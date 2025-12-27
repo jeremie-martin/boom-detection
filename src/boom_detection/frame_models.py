@@ -127,7 +127,7 @@ class FrameLevelClassifier:
 
     def __init__(
         self,
-        model: Literal['logistic', 'gbm'] = 'logistic',
+        model: Literal['logistic', 'gbm', 'hist_gbm'] = 'hist_gbm',
         C: float = 1.0,  # Logistic regularization (inverse)
         n_estimators: int = 100,  # GBM trees
         max_depth: int = 5,  # GBM depth
@@ -166,6 +166,13 @@ class FrameLevelClassifier:
             from sklearn.ensemble import GradientBoostingClassifier
             self._model = GradientBoostingClassifier(
                 n_estimators=self.n_estimators,
+                max_depth=self.max_depth,
+                random_state=42,
+            )
+        elif self.model_type == 'hist_gbm':
+            from sklearn.ensemble import HistGradientBoostingClassifier
+            self._model = HistGradientBoostingClassifier(
+                max_iter=self.n_estimators,
                 max_depth=self.max_depth,
                 random_state=42,
             )

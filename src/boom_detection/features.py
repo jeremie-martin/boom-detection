@@ -249,6 +249,82 @@ def temporal_derivatives(features: np.ndarray, order: int = 1) -> np.ndarray:
 
 
 # =============================================================================
+# Enhanced Temporal Features (Phase 2)
+# =============================================================================
+
+def rolling_features(features: np.ndarray, window: int) -> np.ndarray:
+    """
+    Compute rolling window statistics (mean and std).
+
+    Fully vectorized using uniform_filter1d.
+
+    Args:
+        features: Shape (frames, n_features)
+        window: Window size
+
+    Returns:
+        Shape (frames, n_features * 2) - rolling mean and std
+    """
+    from scipy.ndimage import uniform_filter1d
+
+    # Rolling mean - uniform_filter1d is fully vectorized C code
+    rolling_mean = uniform_filter1d(features, size=window, axis=0, mode='nearest')
+
+    # Rolling std via E[X^2] - E[X]^2
+    rolling_mean_sq = uniform_filter1d(features ** 2, size=window, axis=0, mode='nearest')
+    rolling_var = np.maximum(rolling_mean_sq - rolling_mean ** 2, 0)
+    rolling_std = np.sqrt(rolling_var)
+
+    return np.hstack([rolling_mean, rolling_std])
+
+
+def lag_features(features: np.ndarray, lag: int) -> np.ndarray:
+    """
+    Compute lag features (difference from N frames ago).
+
+    Vectorized implementation.
+
+    Args:
+        features: Shape (frames, n_features)
+        lag: Number of frames to look back
+
+    Returns:
+        Shape (frames, n_features) - difference from lag frames ago
+    """
+    result = np.zeros_like(features)
+    if lag < features.shape[0]:
+        result[lag:] = features[lag:] - features[:-lag]
+    return result
+
+
+def relative_features(features: np.ndarray) -> np.ndarray:
+    """
+    Compute relative features: ratio to max and percentile position.
+
+    Vectorized implementation using argsort for percentiles.
+
+    Args:
+        features: Shape (frames, n_features)
+
+    Returns:
+        Shape (frames, n_features * 2) - ratio_to_max, percentile_position
+    """
+    n_frames = features.shape[0]
+
+    # Ratio to max (per feature) - already vectorized
+    max_vals = np.max(features, axis=0, keepdims=True)
+    max_vals = np.where(max_vals < 1e-9, 1e-9, max_vals)
+    ratio_to_max = features / max_vals
+
+    # Percentile position via argsort (vectorized)
+    # For each feature, rank the frames and convert to percentile
+    ranks = np.argsort(np.argsort(features, axis=0), axis=0)
+    percentile_pos = ranks / (n_frames - 1) if n_frames > 1 else np.zeros_like(features)
+
+    return np.hstack([ratio_to_max, percentile_pos])
+
+
+# =============================================================================
 # Feature Extractor Class
 # =============================================================================
 
@@ -270,10 +346,26 @@ class FeatureConfig:
     # Subsampling for speed and resolution invariance testing
     max_pendulums: int | None = None  # None = use all, e.g. 2000 for fast extraction
     subsample_seed: int = 42  # for reproducibility
+    # Enhanced temporal features (Phase 2)
+    include_rolling: bool = False  # rolling window statistics
+    rolling_windows: tuple[int, ...] = (10, 25, 50)  # window sizes
+    include_lag: bool = False  # lag features (diff from N frames ago)
+    lag_steps: tuple[int, ...] = (5, 10, 25)  # lag amounts
+    include_relative: bool = False  # relative features (ratio to max, percentile)
 
 
 # Default configuration
 DEFAULT_CONFIG = FeatureConfig()
+
+# Enhanced configuration with temporal features (Phase 2)
+ENHANCED_CONFIG = FeatureConfig(
+    max_pendulums=2000,
+    include_rolling=True,
+    rolling_windows=(10, 25),  # reduced for speed
+    include_lag=True,
+    lag_steps=(5, 15),  # reduced for speed
+    include_relative=True,
+)
 
 # Feature names for each extraction function
 FEATURE_GROUPS = {
@@ -398,7 +490,24 @@ class FeatureExtractor:
             all_features = [base_features]
             for order in cfg.derivative_orders:
                 all_features.append(temporal_derivatives(base_features, order))
-            return np.hstack(all_features)
+            base_features = np.hstack(all_features)
+
+        # Enhanced temporal features (Phase 2)
+        enhanced = [base_features]
+
+        if cfg.include_rolling:
+            for window in cfg.rolling_windows:
+                enhanced.append(rolling_features(base_features, window))
+
+        if cfg.include_lag:
+            for lag in cfg.lag_steps:
+                enhanced.append(lag_features(base_features, lag))
+
+        if cfg.include_relative:
+            enhanced.append(relative_features(base_features))
+
+        if len(enhanced) > 1:
+            return np.hstack(enhanced)
 
         return base_features
 
@@ -483,7 +592,8 @@ class FeatureCache:
     def extract_all(
         self,
         dataset: 'Dataset',
-        verbose: bool = True
+        verbose: bool = True,
+        n_jobs: int | None = None,
     ) -> None:
         """
         Extract and cache features for all simulations in a dataset.
@@ -491,21 +601,54 @@ class FeatureCache:
         Args:
             dataset: Dataset object with loaded simulations
             verbose: Print progress
+            n_jobs: Number of parallel workers (None = number of CPUs)
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
 
-        total = len(dataset.annotations)
-        for i, ann in enumerate(dataset.annotations):
+        # Collect simulations to process
+        to_process = []
+        for ann in dataset.annotations:
             sim_id = ann.id
-            if sim_id in self._cache:
-                continue
+            if sim_id not in self._cache:
+                sim = dataset.simulations[sim_id]
+                self._id_to_sim[sim_id] = sim
+                to_process.append((sim_id, sim))
 
-            sim = dataset.simulations[sim_id]
-            self._id_to_sim[sim_id] = sim
-
+        if not to_process:
             if verbose:
-                print(f"Extracting features {i+1}/{total}: {sim_id}")
+                print("All features already cached")
+            return
 
-            self._cache[sim_id] = self.extractor.transform(sim)
+        total = len(to_process)
+        if n_jobs is None:
+            n_jobs = min(os.cpu_count() or 1, total)
+
+        if verbose:
+            print(f"Extracting features for {total} simulations using {n_jobs} workers...")
+
+        def extract_one(item):
+            sim_id, sim = item
+            features = self.extractor.transform(sim)
+            return sim_id, features
+
+        if n_jobs == 1:
+            # Sequential (for debugging)
+            for i, (sim_id, sim) in enumerate(to_process):
+                if verbose:
+                    print(f"  {i+1}/{total}: {sim_id}")
+                self._cache[sim_id] = self.extractor.transform(sim)
+        else:
+            # Parallel extraction
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                futures = {executor.submit(extract_one, item): item[0] for item in to_process}
+                done = 0
+                for future in as_completed(futures):
+                    sim_id, features = future.result()
+                    self._cache[sim_id] = features
+                    done += 1
+                    if verbose and done % 10 == 0:
+                        print(f"  {done}/{total} done")
 
         if verbose:
             print(f"Cached features for {len(self._cache)} simulations")
