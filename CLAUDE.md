@@ -6,6 +6,18 @@ Predict the "boom" frame in double pendulum simulations. See README.md for full 
 
 **Current best**: CNN at MAE 14.3 frames (target: <5)
 
+## What is the Boom?
+
+The boom is **NOT** just when pendulums diverge. It's when **two groups converge**:
+
+1. **Before boom**: Pendulums separate into 2+ distinct clusters
+2. **At boom**: Clusters CONVERGE at a single point (collision effect)
+3. **After boom**: Caustic patterns emerge, explosion
+
+See `BOOM_PHENOMENON.md` for detailed visual analysis and experimental findings.
+
+**Key insight**: Direct convergence detection is hard. ML models work better by learning complex feature combinations.
+
 ## Key Patterns
 
 ### Fast Iteration
@@ -45,6 +57,9 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 | `features.py` | Adding new features |
 | `frame_models.py` | Adding sklearn-based models |
 | `sequence_models.py` | Adding PyTorch models |
+| `convergence.py` | Convergence/bimodality detection (experimental) |
+| `changepoint.py` | CUSUM/BOCPD detectors |
+| `ensemble.py` | Model ensembling |
 | `run_baselines.py` | Adding evaluation utilities |
 | `evaluation.py` | Changing metrics |
 

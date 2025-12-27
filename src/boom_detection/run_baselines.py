@@ -17,7 +17,9 @@ import numpy as np
 from .loader import load_dataset, Dataset
 from .evaluation import compute_all_metrics
 from .features import FeatureCache, FeatureConfig
-from .frame_models import get_frame_level_predictors
+from .frame_models import get_frame_level_predictors, FrameLevelClassifier
+from .changepoint import CUSUMDetector, BOCPDDetector, MultiFeatureCUSUM
+from .ensemble import AdaptiveEnsemble, create_default_ensemble
 
 
 # =============================================================================
@@ -385,12 +387,39 @@ def get_baselines(include_frame_level: bool = True) -> dict[str, object]:
     return baselines
 
 
+def get_changepoint_detectors() -> dict[str, object]:
+    """Get change point detection predictors."""
+    return {
+        'cusum': CUSUMDetector(feature_idx=2, use_derivative=True),  # var_x2
+        'cusum_no_deriv': CUSUMDetector(feature_idx=2, use_derivative=False),
+        'bocpd': BOCPDDetector(feature_idx=2, hazard_rate=1/200),
+        'multi_cusum': MultiFeatureCUSUM(n_features=5, combination='median'),
+    }
+
+
+def get_ensemble_predictors(n_features: int) -> dict[str, object]:
+    """Get ensemble predictors."""
+    # Simple ensemble with best models
+    histgbm = FrameLevelClassifier(model='hist_gbm', n_estimators=200, max_depth=7)
+    cusum = MultiFeatureCUSUM(n_features=5, combination='median')
+
+    simple_ensemble = AdaptiveEnsemble(weight_method='inverse_mae')
+    simple_ensemble.add_model('histgbm', histgbm)
+    simple_ensemble.add_model('cusum', cusum)
+
+    return {
+        'ensemble_histgbm_cusum': simple_ensemble,
+    }
+
+
 def run_baselines(
     data_path: str,
     k: int = 5,
     seed: int = 42,
     max_samples: int | None = None,
     max_pendulums: int | None = 2000,  # Default to 2000 for speed
+    include_changepoint: bool = False,
+    include_ensemble: bool = False,
 ):
     """Run all baselines and print comparison."""
     print(f"Loading dataset from: {data_path}")
@@ -411,11 +440,21 @@ def run_baselines(
     config = FeatureConfig(max_pendulums=max_pendulums) if max_pendulums else None
     cache = FeatureCache(config=config)
     cache.extract_all(dataset, verbose=True)
-    print(f"Feature extraction: {time.time() - t0:.1f}s")
+    n_features = cache[dataset.annotations[0].id].shape[1]
+    print(f"Feature extraction: {time.time() - t0:.1f}s ({n_features} features)")
     print()
 
     # Run baselines
     baselines = get_baselines()
+
+    # Add changepoint detectors if requested
+    if include_changepoint:
+        baselines.update(get_changepoint_detectors())
+
+    # Add ensemble predictors if requested
+    if include_ensemble:
+        baselines.update(get_ensemble_predictors(n_features))
+
     results = {}
 
     print(f"Running {k}-fold cross-validation (seed={seed})")
@@ -463,7 +502,20 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--max-pendulums", type=int, default=2000, help="Subsample pendulums (default: 2000, 0=all)")
     parser.add_argument("-k", "--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--changepoint", action="store_true", help="Include change point detectors")
+    parser.add_argument("--ensemble", action="store_true", help="Include ensemble predictors")
+    parser.add_argument("--phase4", action="store_true", help="Run Phase 4 models (changepoint + ensemble)")
     args = parser.parse_args()
 
     max_pendulums = args.max_pendulums if args.max_pendulums > 0 else None
-    run_baselines(args.data_path, k=args.folds, seed=args.seed, max_samples=args.max_samples, max_pendulums=max_pendulums)
+    include_changepoint = args.changepoint or args.phase4
+    include_ensemble = args.ensemble or args.phase4
+    run_baselines(
+        args.data_path,
+        k=args.folds,
+        seed=args.seed,
+        max_samples=args.max_samples,
+        max_pendulums=max_pendulums,
+        include_changepoint=include_changepoint,
+        include_ensemble=include_ensemble,
+    )

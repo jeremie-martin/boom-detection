@@ -56,6 +56,29 @@ from .sequence_models import (
     get_sequence_models,
 )
 
+from .changepoint import (
+    CUSUMDetector,
+    BOCPDDetector,
+    MultiFeatureCUSUM,
+)
+
+from .ensemble import (
+    WeightedEnsemble,
+    StackingEnsemble,
+    AdaptiveEnsemble,
+    create_default_ensemble,
+)
+
+from .convergence import (
+    angular_bimodality,
+    cluster_distance,
+    convergence_rate,
+    tip_concentration,
+    extract_convergence_features,
+    ConvergenceDetector,
+    BimodalityDetector,
+)
+
 __all__ = [
     # Loader
     "Annotation",
@@ -101,4 +124,21 @@ __all__ = [
     "TransformerClassifier",
     "SequenceTrainer",
     "get_sequence_models",
+    # Change point detection
+    "CUSUMDetector",
+    "BOCPDDetector",
+    "MultiFeatureCUSUM",
+    # Ensemble
+    "WeightedEnsemble",
+    "StackingEnsemble",
+    "AdaptiveEnsemble",
+    "create_default_ensemble",
+    # Convergence detection
+    "angular_bimodality",
+    "cluster_distance",
+    "convergence_rate",
+    "tip_concentration",
+    "extract_convergence_features",
+    "ConvergenceDetector",
+    "BimodalityDetector",
 ]
