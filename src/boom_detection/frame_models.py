@@ -33,15 +33,17 @@ class FrameLevelRegressor:
 
     def __init__(
         self,
-        model: Literal['ridge', 'gbm'] = 'ridge',
+        model: Literal['ridge', 'gbm', 'hist_gbm'] = 'ridge',
         alpha: float = 1.0,  # Ridge regularization
         n_estimators: int = 100,  # GBM trees
         max_depth: int = 5,  # GBM depth
+        aggregation: Literal['median', 'zero_crossing', 'weighted'] = 'median',
     ):
         self.model_type = model
         self.alpha = alpha
         self.n_estimators = n_estimators
         self.max_depth = max_depth
+        self.aggregation = aggregation
         self._model = None
 
     def fit(self, sim_ids: list[str], boom_frames: np.ndarray, cache: FeatureCache) -> None:
@@ -79,6 +81,13 @@ class FrameLevelRegressor:
                 max_depth=self.max_depth,
                 random_state=42,
             )
+        elif self.model_type == 'hist_gbm':
+            from sklearn.ensemble import HistGradientBoostingRegressor
+            self._model = HistGradientBoostingRegressor(
+                max_iter=self.n_estimators,
+                max_depth=self.max_depth,
+                random_state=42,
+            )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
@@ -90,8 +99,7 @@ class FrameLevelRegressor:
 
         For each simulation:
         1. Predict distance-to-boom for all frames
-        2. Compute predicted_boom = frame_index + predicted_distance
-        3. Take robust estimate (median) of predicted boom
+        2. Aggregate predictions based on chosen strategy
         """
         predictions = []
 
@@ -100,13 +108,41 @@ class FrameLevelRegressor:
             n_frames = len(features)
 
             # Predict distance for each frame
+            # Positive = before boom, negative = after boom
             distances = self._model.predict(features)
 
-            # Each frame's prediction of where the boom is
-            predicted_booms = np.arange(n_frames) + distances
+            if self.aggregation == 'median':
+                # Each frame's prediction of where the boom is
+                predicted_booms = np.arange(n_frames) + distances
+                boom_pred = np.median(predicted_booms)
 
-            # Robust estimate: median of all frame predictions
-            boom_pred = np.median(predicted_booms)
+            elif self.aggregation == 'zero_crossing':
+                # Find where distance crosses zero (like classifier threshold)
+                # Distance goes from positive (before boom) to negative (after boom)
+                crossings = np.where(distances[:-1] * distances[1:] <= 0)[0]
+                if len(crossings) > 0:
+                    # Use first crossing point
+                    idx = crossings[0]
+                    # Linear interpolation to find exact crossing
+                    d0, d1 = distances[idx], distances[idx + 1]
+                    if d1 != d0:
+                        t = -d0 / (d1 - d0)
+                        boom_pred = idx + t
+                    else:
+                        boom_pred = idx
+                else:
+                    # No crossing found - use frame with smallest absolute distance
+                    boom_pred = np.argmin(np.abs(distances))
+
+            elif self.aggregation == 'weighted':
+                # Weight each frame's prediction by inverse of predicted distance magnitude
+                # Frames predicting distance ≈ 0 get highest weight
+                predicted_booms = np.arange(n_frames) + distances
+                weights = 1.0 / (np.abs(distances) + 1.0)  # +1 to avoid div by zero
+                boom_pred = np.average(predicted_booms, weights=weights)
+
+            else:
+                raise ValueError(f"Unknown aggregation: {self.aggregation}")
 
             # Clip to valid range
             boom_pred = int(np.clip(boom_pred, 0, n_frames - 1))
