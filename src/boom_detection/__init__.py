@@ -48,6 +48,14 @@ from .frame_models import (
     get_frame_level_predictors,
 )
 
+from .sequence_models import (
+    CNNClassifier,
+    LSTMClassifier,
+    TransformerClassifier,
+    SequenceTrainer,
+    get_sequence_models,
+)
+
 __all__ = [
     # Loader
     "Annotation",
@@ -87,4 +95,10 @@ __all__ = [
     "FrameLevelRegressor",
     "FrameLevelClassifier",
     "get_frame_level_predictors",
+    # Sequence models
+    "CNNClassifier",
+    "LSTMClassifier",
+    "TransformerClassifier",
+    "SequenceTrainer",
+    "get_sequence_models",
 ]

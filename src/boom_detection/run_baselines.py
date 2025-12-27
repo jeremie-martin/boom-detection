@@ -191,6 +191,76 @@ class LinearRegressionPredictor:
 
 
 # =============================================================================
+# Fast Evaluation (no dataset loading needed)
+# =============================================================================
+
+def quick_cv(
+    predictor,
+    cache: FeatureCache,
+    data_path: str = 'data',
+    k: int = 5,
+    seed: int = 42,
+) -> dict:
+    """
+    Run CV using only cached features - no dataset loading required.
+
+    This is the fastest way to iterate: ~0.2s to load features vs ~30s for full dataset.
+
+    Args:
+        predictor: Model with fit() and predict() methods
+        cache: FeatureCache with disk caching enabled
+        data_path: Path to data directory (for annotations.json)
+        k: Number of CV folds
+        seed: Random seed
+
+    Returns:
+        Dict with predictions, ground_truth, and metrics
+    """
+    from sklearn.model_selection import KFold
+    from .loader import load_annotations
+    import os
+
+    # Load just the annotations (tiny file, instant)
+    if os.path.isdir(data_path):
+        ann_path = os.path.join(data_path, 'annotations.json')
+    else:
+        ann_path = data_path
+    annotations = load_annotations(ann_path)
+
+    # Load features from disk cache
+    sim_ids = [a.id for a in annotations]
+    cache.load_from_disk(sim_ids, verbose=True)
+
+    # Filter to only simulations we have cached
+    available = [a for a in annotations if a.id in cache]
+    if len(available) < len(annotations):
+        print(f"Warning: Only {len(available)}/{len(annotations)} simulations cached")
+    annotations = available
+
+    ids = [a.id for a in annotations]
+    targets = np.array([a.boom_frame for a in annotations])
+
+    # Run CV
+    kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+    all_preds = np.zeros(len(ids))
+
+    for train_idx, test_idx in kf.split(ids):
+        train_ids = [ids[i] for i in train_idx]
+        test_ids = [ids[i] for i in test_idx]
+        train_y = targets[train_idx]
+
+        predictor.fit(train_ids, train_y, cache)
+        preds = predictor.predict(test_ids, cache)
+        all_preds[test_idx] = preds
+
+    return {
+        'predictions': all_preds,
+        'ground_truth': targets,
+        'metrics': compute_all_metrics(targets, all_preds, task='frame'),
+    }
+
+
+# =============================================================================
 # Evaluation with caching
 # =============================================================================
 

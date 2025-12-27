@@ -915,14 +915,14 @@ class FeatureCache:
             self._id_to_sim[sim_id] = simulation
         return self._cache[sim_id]
 
-    def load_from_disk(self, sim_ids: list[str], verbose: bool = True) -> int:
+    def load_from_disk(self, sim_ids: list[str] | None = None, verbose: bool = True) -> int:
         """
         Load features from disk cache without needing the dataset.
 
         This is the fastest way to iterate: extract once, then load from disk.
 
         Args:
-            sim_ids: List of simulation IDs to load
+            sim_ids: List of simulation IDs to load. If None, loads all cached files.
             verbose: Print progress
 
         Returns:
@@ -930,6 +930,19 @@ class FeatureCache:
         """
         if not self.cache_dir:
             raise ValueError("No cache_dir specified. Create FeatureCache with cache_dir.")
+
+        import os
+
+        # If no sim_ids specified, discover from cache directory
+        if sim_ids is None:
+            suffix = f"_{self._config_hash}.npy"
+            sim_ids = []
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith(suffix):
+                    sim_id = filename[:-len(suffix)]
+                    sim_ids.append(sim_id)
+            if verbose:
+                print(f"Discovered {len(sim_ids)} cached simulations")
 
         loaded = 0
         missing = []
