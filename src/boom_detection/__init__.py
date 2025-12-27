@@ -29,6 +29,7 @@ from .features import (
     FeatureCache,
     extract_features,
     get_feature_names,
+    CAUSTIC_CONFIG,
 )
 
 from .baselines import (
@@ -73,6 +74,7 @@ __all__ = [
     "FeatureCache",
     "extract_features",
     "get_feature_names",
+    "CAUSTIC_CONFIG",
     # Baselines
     "MeanPredictor",
     "MedianPredictor",

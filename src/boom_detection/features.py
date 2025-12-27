@@ -229,6 +229,175 @@ def velocity_features(data: np.ndarray) -> np.ndarray:
     ], axis=1)
 
 
+# =============================================================================
+# Caustic / Angular Distribution Features
+# =============================================================================
+
+def _wrap_2pi(angles: np.ndarray) -> np.ndarray:
+    """Wrap angles to [0, 2π)."""
+    return angles % (2 * np.pi)
+
+
+def _gini_coefficient(counts: np.ndarray) -> np.ndarray:
+    """
+    Compute Gini coefficient of histogram counts.
+
+    Vectorized for multiple frames: counts shape (frames, n_bins).
+
+    Returns:
+        Shape (frames,) - Gini coefficient per frame
+    """
+    # Sort counts ascending along bin axis
+    sorted_counts = np.sort(counts, axis=1)
+    n_bins = counts.shape[1]
+    total = counts.sum(axis=1, keepdims=True)
+
+    # Avoid division by zero
+    total = np.where(total < 1e-9, 1e-9, total)
+
+    # Gini formula: sum of (2*rank - n - 1) * x / (n * sum)
+    ranks = np.arange(1, n_bins + 1)  # 1-indexed ranks
+    weights = 2 * ranks - n_bins - 1
+    numerator = (sorted_counts * weights).sum(axis=1)
+
+    return numerator / (n_bins * total.squeeze())
+
+
+def _mean_resultant_length(angles: np.ndarray) -> np.ndarray:
+    """
+    Compute mean resultant length (circular concentration).
+
+    Args:
+        angles: Shape (frames, pendulums)
+
+    Returns:
+        Shape (frames,) - R value in [0, 1], high = concentrated
+    """
+    mean_cos = np.mean(np.cos(angles), axis=1)
+    mean_sin = np.mean(np.sin(angles), axis=1)
+    return np.sqrt(mean_cos**2 + mean_sin**2)
+
+
+def _angular_histogram(angles: np.ndarray, n_bins: int = 36) -> np.ndarray:
+    """
+    Compute histogram of angles across pendulums for each frame.
+
+    Args:
+        angles: Shape (frames, pendulums)
+        n_bins: Number of angular bins (36 = 10° bins)
+
+    Returns:
+        Shape (frames, n_bins) - counts per bin
+    """
+    n_frames = angles.shape[0]
+    wrapped = _wrap_2pi(angles)
+
+    # Bin edges from 0 to 2π
+    bin_width = 2 * np.pi / n_bins
+    bin_indices = np.clip((wrapped / bin_width).astype(int), 0, n_bins - 1)
+
+    # Count per bin per frame (vectorized via advanced indexing)
+    counts = np.zeros((n_frames, n_bins), dtype=np.float64)
+    frame_indices = np.arange(n_frames)[:, None]  # (frames, 1)
+
+    # Use np.add.at for unbuffered in-place addition
+    np.add.at(counts, (np.broadcast_to(frame_indices, bin_indices.shape), bin_indices), 1)
+
+    return counts
+
+
+def _birthday_corrected_coverage(counts: np.ndarray, n_samples: int) -> np.ndarray:
+    """
+    Compute birthday-corrected coverage (occupied bins / expected occupied).
+
+    Args:
+        counts: Shape (frames, n_bins) - histogram counts
+        n_samples: Number of samples (pendulums)
+
+    Returns:
+        Shape (frames,) - normalized coverage in [0, 1+]
+    """
+    n_bins = counts.shape[1]
+    occupied = (counts > 0).sum(axis=1)
+    raw_coverage = occupied / n_bins
+
+    # Expected coverage if uniformly random: 1 - (1 - 1/M)^N
+    expected = 1 - (1 - 1/n_bins) ** n_samples
+
+    if expected > 0.01:
+        return np.minimum(1.0, raw_coverage / expected)
+    else:
+        return raw_coverage
+
+
+def _causticness_from_angles(angles: np.ndarray, n_bins: int = 36) -> np.ndarray:
+    """
+    Core causticness computation: coverage × gini.
+
+    High when angles cover many bins AND are unevenly distributed (spiky).
+
+    Args:
+        angles: Shape (frames, pendulums)
+        n_bins: Number of angular bins
+
+    Returns:
+        Shape (frames,) - causticness values
+    """
+    n_pendulums = angles.shape[1]
+    counts = _angular_histogram(angles, n_bins)
+    coverage = _birthday_corrected_coverage(counts, n_pendulums)
+    gini = _gini_coefficient(counts)
+    return coverage * gini
+
+
+def caustic_features(data: np.ndarray, n_bins: int = 36) -> np.ndarray:
+    """
+    Compute caustic/angular distribution features.
+
+    These capture angular clustering patterns that simple statistics miss.
+
+    Features:
+    1. angular_causticness: coverage × gini of (θ1 + θ2)
+    2. tip_causticness: coverage × gini of atan2(x2, y2)
+    3. joint_concentration: causticness(θ1) × causticness(θ2)
+    4. organization_causticness: (1 - R1*R2) × coverage
+
+    Args:
+        data: Shape (frames, pendulums, 8)
+        n_bins: Number of angular bins (36 = 10° bins)
+
+    Returns:
+        Shape (frames, 4) - the four caustic metrics
+    """
+    th1 = data[:, :, TH1]
+    th2 = data[:, :, TH2]
+    x2 = data[:, :, X2]
+    y2 = data[:, :, Y2]
+    n_pendulums = data.shape[1]
+
+    # 1. Angular causticness: tip direction from angles
+    tip_angles_from_theta = th1 + th2
+    angular_caust = _causticness_from_angles(tip_angles_from_theta, n_bins)
+
+    # 2. Tip causticness: tip direction from positions (atan2)
+    tip_angles_from_pos = np.arctan2(x2, y2)  # angle from vertical
+    tip_caust = _causticness_from_angles(tip_angles_from_pos, n_bins)
+
+    # 3. Joint concentration: both angles individually show caustic behavior
+    th1_caust = _causticness_from_angles(th1, n_bins)
+    th2_caust = _causticness_from_angles(th2, n_bins)
+    joint_conc = th1_caust * th2_caust
+
+    # 4. Organization causticness: spread (low concentration) × coverage
+    R1 = _mean_resultant_length(th1)
+    R2 = _mean_resultant_length(th2)
+    counts = _angular_histogram(tip_angles_from_theta, n_bins)
+    coverage = _birthday_corrected_coverage(counts, n_pendulums)
+    org_caust = (1 - R1 * R2) * coverage
+
+    return np.stack([angular_caust, tip_caust, joint_conc, org_caust], axis=1)
+
+
 def temporal_derivatives(features: np.ndarray, order: int = 1) -> np.ndarray:
     """
     Compute temporal derivatives of features.
@@ -341,6 +510,8 @@ class FeatureConfig:
     include_tip_spread: bool = True
     include_angular_spread: bool = True
     include_velocity: bool = True
+    include_caustic: bool = False  # caustic/angular distribution features
+    caustic_bins: int = 36  # number of angular bins (36 = 10° bins)
     include_derivatives: bool = True
     derivative_orders: tuple[int, ...] = (1, 2)
     # Subsampling for speed and resolution invariance testing
@@ -367,6 +538,12 @@ ENHANCED_CONFIG = FeatureConfig(
     include_relative=True,
 )
 
+# Configuration with caustic/angular distribution features
+CAUSTIC_CONFIG = FeatureConfig(
+    max_pendulums=2000,
+    include_caustic=True,
+)
+
 # Feature names for each extraction function
 FEATURE_GROUPS = {
     'variance': ['var_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
@@ -379,6 +556,7 @@ FEATURE_GROUPS = {
     'tip_spread': ['tip_area', 'tip_max_dist', 'tip_mean_dist'],
     'angular_spread': ['th1_spread', 'th2_spread', 'th1_cstd', 'th2_cstd'],
     'velocity': ['var_w1', 'var_w2', 'mean_abs_w1', 'mean_abs_w2', 'range_abs_w1', 'range_abs_w2'],
+    'caustic': ['angular_causticness', 'tip_causticness', 'joint_concentration', 'organization_causticness'],
 }
 
 
@@ -426,6 +604,8 @@ class FeatureExtractor:
             base_groups.append('angular_spread')
         if cfg.include_velocity:
             base_groups.append('velocity')
+        if cfg.include_caustic:
+            base_groups.append('caustic')
 
         for group in base_groups:
             names.extend(FEATURE_GROUPS[group])
@@ -481,6 +661,8 @@ class FeatureExtractor:
             features_list.append(angular_spread_features(data))
         if cfg.include_velocity:
             features_list.append(velocity_features(data))
+        if cfg.include_caustic:
+            features_list.append(caustic_features(data, cfg.caustic_bins))
 
         # Combine base features
         base_features = np.hstack(features_list)
