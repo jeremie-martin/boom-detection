@@ -17,6 +17,7 @@ import numpy as np
 from .loader import load_dataset, Dataset
 from .evaluation import compute_all_metrics
 from .features import FeatureCache, FeatureConfig
+from .frame_models import get_frame_level_predictors
 
 
 # =============================================================================
@@ -231,9 +232,9 @@ def cross_validate_cached(
     }
 
 
-def get_baselines() -> dict[str, object]:
+def get_baselines(include_frame_level: bool = True) -> dict[str, object]:
     """Get all baseline predictors."""
-    return {
+    baselines = {
         'mean': MeanPredictor(),
         'median': MedianPredictor(),
         'variance_threshold': VarianceThresholdPredictor(),
@@ -241,6 +242,11 @@ def get_baselines() -> dict[str, object]:
         'second_derivative': SecondDerivativePredictor(),
         'linear_regression': LinearRegressionPredictor(),
     }
+
+    if include_frame_level:
+        baselines.update(get_frame_level_predictors())
+
+    return baselines
 
 
 def run_baselines(

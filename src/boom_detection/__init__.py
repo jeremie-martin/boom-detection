@@ -41,6 +41,12 @@ from .baselines import (
     get_all_baselines,
 )
 
+from .frame_models import (
+    FrameLevelRegressor,
+    FrameLevelClassifier,
+    get_frame_level_predictors,
+)
+
 __all__ = [
     # Loader
     "Annotation",
@@ -75,4 +81,8 @@ __all__ = [
     "SecondDerivativePredictor",
     "LinearRegressionPredictor",
     "get_all_baselines",
+    # Frame-level models
+    "FrameLevelRegressor",
+    "FrameLevelClassifier",
+    "get_frame_level_predictors",
 ]
