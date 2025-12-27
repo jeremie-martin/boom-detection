@@ -754,22 +754,67 @@ class FeatureCache:
     Caches extracted features to avoid redundant computation.
 
     Extract features once for all simulations, then look them up instantly.
+    Optionally saves to disk for persistence across runs.
 
     Usage:
+        # In-memory only:
         cache = FeatureCache()
         cache.extract_all(dataset, verbose=True)
 
-        # Now features are instant to retrieve
-        features = cache.get("run_20251226_110631")
-        # or
-        features = cache[simulation_id]
+        # With disk persistence (recommended for iteration):
+        cache = FeatureCache(cache_dir='./feature_cache')
+        cache.extract_all(dataset)  # Saves to disk
+        # Next run: features loaded from disk instantly!
+
+        # Access features
+        features = cache["run_20251226_110631"]
     """
 
-    def __init__(self, config: FeatureConfig | None = None):
+    def __init__(self, config: FeatureConfig | None = None, cache_dir: str | None = None):
         self.config = config
+        self.cache_dir = cache_dir
         self.extractor = FeatureExtractor(config)
         self._cache: dict[str, np.ndarray] = {}
         self._id_to_sim: dict[str, 'Simulation'] = {}
+
+        # Create cache directory if specified
+        if cache_dir:
+            import os
+            os.makedirs(cache_dir, exist_ok=True)
+            self._config_hash = self._compute_config_hash()
+
+    def _compute_config_hash(self) -> str:
+        """Compute a hash of the config to detect changes."""
+        import hashlib
+        import json
+        from dataclasses import asdict
+        config_dict = asdict(self.config) if self.config else {}
+        config_str = json.dumps(config_dict, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()[:8]
+
+    def _get_cache_path(self, sim_id: str) -> str:
+        """Get the cache file path for a simulation."""
+        import os
+        # Include config hash to invalidate cache when config changes
+        filename = f"{sim_id}_{self._config_hash}.npy"
+        return os.path.join(self.cache_dir, filename)
+
+    def _load_from_disk(self, sim_id: str) -> np.ndarray | None:
+        """Try to load features from disk cache."""
+        if not self.cache_dir:
+            return None
+        import os
+        path = self._get_cache_path(sim_id)
+        if os.path.exists(path):
+            return np.load(path)
+        return None
+
+    def _save_to_disk(self, sim_id: str, features: np.ndarray) -> None:
+        """Save features to disk cache."""
+        if not self.cache_dir:
+            return
+        path = self._get_cache_path(sim_id)
+        np.save(path, features)
 
     def extract_all(
         self,
@@ -780,6 +825,9 @@ class FeatureCache:
         """
         Extract and cache features for all simulations in a dataset.
 
+        If cache_dir was specified, features are loaded from disk if available,
+        and newly extracted features are saved to disk.
+
         Args:
             dataset: Dataset object with loaded simulations
             verbose: Print progress
@@ -788,17 +836,32 @@ class FeatureCache:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
 
-        # Collect simulations to process
+        # First, try to load from disk cache
+        loaded_from_disk = 0
         to_process = []
+
         for ann in dataset.annotations:
             sim_id = ann.id
-            if sim_id not in self._cache:
-                sim = dataset.simulations[sim_id]
-                self._id_to_sim[sim_id] = sim
-                to_process.append((sim_id, sim))
+            if sim_id in self._cache:
+                continue  # Already in memory
+
+            # Try disk cache first
+            disk_features = self._load_from_disk(sim_id)
+            if disk_features is not None:
+                self._cache[sim_id] = disk_features
+                loaded_from_disk += 1
+                continue
+
+            # Need to extract - requires the simulation data
+            sim = dataset.simulations[sim_id]
+            self._id_to_sim[sim_id] = sim
+            to_process.append((sim_id, sim))
+
+        if loaded_from_disk > 0 and verbose:
+            print(f"Loaded {loaded_from_disk} simulations from disk cache")
 
         if not to_process:
-            if verbose:
+            if verbose and loaded_from_disk == 0:
                 print("All features already cached")
             return
 
@@ -819,7 +882,9 @@ class FeatureCache:
             for i, (sim_id, sim) in enumerate(to_process):
                 if verbose:
                     print(f"  {i+1}/{total}: {sim_id}")
-                self._cache[sim_id] = self.extractor.transform(sim)
+                features = self.extractor.transform(sim)
+                self._cache[sim_id] = features
+                self._save_to_disk(sim_id, features)
         else:
             # Parallel extraction
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
@@ -828,6 +893,7 @@ class FeatureCache:
                 for future in as_completed(futures):
                     sim_id, features = future.result()
                     self._cache[sim_id] = features
+                    self._save_to_disk(sim_id, features)
                     done += 1
                     if verbose and done % 10 == 0:
                         print(f"  {done}/{total} done")
@@ -838,13 +904,61 @@ class FeatureCache:
     def extract_single(self, sim_id: str, simulation: 'Simulation') -> np.ndarray:
         """Extract and cache features for a single simulation."""
         if sim_id not in self._cache:
-            self._cache[sim_id] = self.extractor.transform(simulation)
+            # Try disk cache first
+            disk_features = self._load_from_disk(sim_id)
+            if disk_features is not None:
+                self._cache[sim_id] = disk_features
+            else:
+                features = self.extractor.transform(simulation)
+                self._cache[sim_id] = features
+                self._save_to_disk(sim_id, features)
             self._id_to_sim[sim_id] = simulation
         return self._cache[sim_id]
+
+    def load_from_disk(self, sim_ids: list[str], verbose: bool = True) -> int:
+        """
+        Load features from disk cache without needing the dataset.
+
+        This is the fastest way to iterate: extract once, then load from disk.
+
+        Args:
+            sim_ids: List of simulation IDs to load
+            verbose: Print progress
+
+        Returns:
+            Number of simulations successfully loaded
+        """
+        if not self.cache_dir:
+            raise ValueError("No cache_dir specified. Create FeatureCache with cache_dir.")
+
+        loaded = 0
+        missing = []
+        for sim_id in sim_ids:
+            if sim_id in self._cache:
+                loaded += 1
+                continue
+            features = self._load_from_disk(sim_id)
+            if features is not None:
+                self._cache[sim_id] = features
+                loaded += 1
+            else:
+                missing.append(sim_id)
+
+        if verbose:
+            print(f"Loaded {loaded}/{len(sim_ids)} simulations from disk cache")
+            if missing:
+                print(f"Missing: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+
+        return loaded
 
     def get(self, sim_id: str) -> np.ndarray:
         """Get cached features by simulation ID."""
         if sim_id not in self._cache:
+            # Try disk cache as fallback
+            disk_features = self._load_from_disk(sim_id)
+            if disk_features is not None:
+                self._cache[sim_id] = disk_features
+                return disk_features
             raise KeyError(f"No cached features for {sim_id}. Call extract_all() first.")
         return self._cache[sim_id]
 
@@ -852,7 +966,14 @@ class FeatureCache:
         return self.get(sim_id)
 
     def __contains__(self, sim_id: str) -> bool:
-        return sim_id in self._cache
+        if sim_id in self._cache:
+            return True
+        # Check disk cache
+        disk_features = self._load_from_disk(sim_id)
+        if disk_features is not None:
+            self._cache[sim_id] = disk_features
+            return True
+        return False
 
     def __len__(self) -> int:
         return len(self._cache)

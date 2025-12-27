@@ -5,7 +5,9 @@ description = "Predicting critical transition frames in chaotic double pendulum 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.10.8",
     "numpy>=2.0",
+    "pyqt6>=6.10.1",
     "zstandard>=0.23",
 ]
 
