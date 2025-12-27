@@ -13,16 +13,26 @@ Usage:
     # Or use the class for more control
     extractor = FeatureExtractor()
     features = extractor.transform(simulation)
+
+    # For efficiency, use FeatureCache to extract once and reuse
+    from boom_detection.features import FeatureCache
+
+    cache = FeatureCache()
+    cache.extract_all(dataset)  # extracts features for all simulations
+    features = cache.get(simulation_id)  # instant lookup
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, TYPE_CHECKING
 
 import numpy as np
 
 from .loader import Simulation, X1, Y1, X2, Y2, TH1, TH2, W1, W2
+
+if TYPE_CHECKING:
+    from .loader import Dataset
 
 
 # =============================================================================
@@ -432,3 +442,86 @@ def extract_features(
 def get_feature_names(config: FeatureConfig | None = None) -> list[str]:
     """Get list of feature names for a configuration."""
     return FeatureExtractor(config).feature_names
+
+
+# =============================================================================
+# Feature Cache
+# =============================================================================
+
+class FeatureCache:
+    """
+    Caches extracted features to avoid redundant computation.
+
+    Extract features once for all simulations, then look them up instantly.
+
+    Usage:
+        cache = FeatureCache()
+        cache.extract_all(dataset, verbose=True)
+
+        # Now features are instant to retrieve
+        features = cache.get("run_20251226_110631")
+        # or
+        features = cache[simulation_id]
+    """
+
+    def __init__(self, config: FeatureConfig | None = None):
+        self.config = config
+        self.extractor = FeatureExtractor(config)
+        self._cache: dict[str, np.ndarray] = {}
+        self._id_to_sim: dict[str, 'Simulation'] = {}
+
+    def extract_all(
+        self,
+        dataset: 'Dataset',
+        verbose: bool = True
+    ) -> None:
+        """
+        Extract and cache features for all simulations in a dataset.
+
+        Args:
+            dataset: Dataset object with loaded simulations
+            verbose: Print progress
+        """
+
+        total = len(dataset.annotations)
+        for i, ann in enumerate(dataset.annotations):
+            sim_id = ann.id
+            if sim_id in self._cache:
+                continue
+
+            sim = dataset.simulations[sim_id]
+            self._id_to_sim[sim_id] = sim
+
+            if verbose:
+                print(f"Extracting features {i+1}/{total}: {sim_id}")
+
+            self._cache[sim_id] = self.extractor.transform(sim)
+
+        if verbose:
+            print(f"Cached features for {len(self._cache)} simulations")
+
+    def extract_single(self, sim_id: str, simulation: 'Simulation') -> np.ndarray:
+        """Extract and cache features for a single simulation."""
+        if sim_id not in self._cache:
+            self._cache[sim_id] = self.extractor.transform(simulation)
+            self._id_to_sim[sim_id] = simulation
+        return self._cache[sim_id]
+
+    def get(self, sim_id: str) -> np.ndarray:
+        """Get cached features by simulation ID."""
+        if sim_id not in self._cache:
+            raise KeyError(f"No cached features for {sim_id}. Call extract_all() first.")
+        return self._cache[sim_id]
+
+    def __getitem__(self, sim_id: str) -> np.ndarray:
+        return self.get(sim_id)
+
+    def __contains__(self, sim_id: str) -> bool:
+        return sim_id in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    @property
+    def feature_names(self) -> list[str]:
+        return self.extractor.feature_names
