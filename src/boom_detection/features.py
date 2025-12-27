@@ -267,6 +267,9 @@ class FeatureConfig:
     include_velocity: bool = True
     include_derivatives: bool = True
     derivative_orders: tuple[int, ...] = (1, 2)
+    # Subsampling for speed and resolution invariance testing
+    max_pendulums: int | None = None  # None = use all, e.g. 2000 for fast extraction
+    subsample_seed: int = 42  # for reproducibility
 
 
 # Default configuration
@@ -354,6 +357,13 @@ class FeatureExtractor:
         """
         data = simulation.data
         cfg = self.config
+
+        # Subsample pendulums if configured (for speed and resolution invariance)
+        if cfg.max_pendulums is not None and data.shape[1] > cfg.max_pendulums:
+            rng = np.random.RandomState(cfg.subsample_seed)
+            indices = rng.choice(data.shape[1], cfg.max_pendulums, replace=False)
+            data = data[:, indices, :]
+
         features_list = []
 
         # Base statistical features

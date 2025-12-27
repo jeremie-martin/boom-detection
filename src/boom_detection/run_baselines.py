@@ -16,7 +16,7 @@ import numpy as np
 
 from .loader import load_dataset, Dataset
 from .evaluation import compute_all_metrics
-from .features import FeatureCache
+from .features import FeatureCache, FeatureConfig
 
 
 # =============================================================================
@@ -243,11 +243,19 @@ def get_baselines() -> dict[str, object]:
     }
 
 
-def run_baselines(data_path: str, k: int = 5, seed: int = 42, max_samples: int | None = None):
+def run_baselines(
+    data_path: str,
+    k: int = 5,
+    seed: int = 42,
+    max_samples: int | None = None,
+    max_pendulums: int | None = 2000,  # Default to 2000 for speed
+):
     """Run all baselines and print comparison."""
     print(f"Loading dataset from: {data_path}")
     if max_samples:
         print(f"Limiting to {max_samples} samples")
+    if max_pendulums:
+        print(f"Subsampling to {max_pendulums} pendulums per simulation")
     print("=" * 60)
 
     t0 = time.time()
@@ -255,10 +263,11 @@ def run_baselines(data_path: str, k: int = 5, seed: int = 42, max_samples: int |
     print(f"Loaded {len(dataset)} simulations in {time.time() - t0:.1f}s")
     print()
 
-    # Extract features once
+    # Extract features once (with optional subsampling for speed)
     print("Extracting features (one-time cost)...")
     t0 = time.time()
-    cache = FeatureCache()
+    config = FeatureConfig(max_pendulums=max_pendulums) if max_pendulums else None
+    cache = FeatureCache(config=config)
     cache.extract_all(dataset, verbose=True)
     print(f"Feature extraction: {time.time() - t0:.1f}s")
     print()
@@ -309,8 +318,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run baseline predictors")
     parser.add_argument("data_path", nargs="?", default="data", help="Path to data directory")
     parser.add_argument("-n", "--max-samples", type=int, default=None, help="Limit samples (for quick testing)")
+    parser.add_argument("-p", "--max-pendulums", type=int, default=2000, help="Subsample pendulums (default: 2000, 0=all)")
     parser.add_argument("-k", "--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
-    run_baselines(args.data_path, k=args.folds, seed=args.seed, max_samples=args.max_samples)
+    max_pendulums = args.max_pendulums if args.max_pendulums > 0 else None
+    run_baselines(args.data_path, k=args.folds, seed=args.seed, max_samples=args.max_samples, max_pendulums=max_pendulums)

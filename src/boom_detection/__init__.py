@@ -26,6 +26,7 @@ from .evaluation import (
 from .features import (
     FeatureExtractor,
     FeatureConfig,
+    FeatureCache,
     extract_features,
     get_feature_names,
 )
@@ -63,6 +64,7 @@ __all__ = [
     # Features
     "FeatureExtractor",
     "FeatureConfig",
+    "FeatureCache",
     "extract_features",
     "get_feature_names",
     # Baselines
