@@ -1,5 +1,7 @@
 # Data Format Specification
 
+> **Note**: Most users don't need this. Use `loader.py` which handles all decoding automatically.
+
 Complete technical specification for simulation data files.
 
 ## simulation_data.bin
