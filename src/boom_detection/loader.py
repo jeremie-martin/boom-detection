@@ -221,6 +221,7 @@ def load_dataset(
     root: str | Path,
     load_simulations: bool = True,
     verbose: bool = True,
+    max_samples: int | None = None,
 ) -> Dataset:
     """
     Load the complete dataset.
@@ -229,6 +230,7 @@ def load_dataset(
         root: Root directory containing annotations.json and simulations/
         load_simulations: Whether to load raw simulation data (memory intensive)
         verbose: Print progress
+        max_samples: Limit to first N samples (for quick testing)
 
     Returns:
         Dataset object with annotations and optionally loaded data
@@ -237,17 +239,35 @@ def load_dataset(
 
     # Load annotations
     annotations = load_annotations(root / 'annotations.json')
+
+    if max_samples is not None and max_samples < len(annotations):
+        annotations = annotations[:max_samples]
+        if verbose:
+            print(f"Limited to {max_samples} samples")
+
     if verbose:
         print(f"Loaded {len(annotations)} annotations")
 
     simulations = {}
 
     if load_simulations:
+        failed = []
         for i, ann in enumerate(annotations):
             sim_path = root / ann.data_path
             if verbose:
                 print(f"Loading simulation {i+1}/{len(annotations)}: {ann.id}")
-            simulations[ann.id] = load_simulation(sim_path)
+            try:
+                simulations[ann.id] = load_simulation(sim_path)
+            except Exception as e:
+                if verbose:
+                    print(f"  WARNING: Failed to load {ann.id}: {e}")
+                failed.append(ann.id)
+
+        if failed:
+            # Remove annotations for failed simulations
+            annotations = [a for a in annotations if a.id not in failed]
+            if verbose:
+                print(f"Skipped {len(failed)} corrupted simulations, {len(annotations)} remaining")
 
     return Dataset(
         annotations=annotations,
