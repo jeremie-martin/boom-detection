@@ -194,6 +194,30 @@ class LinearRegressionPredictor:
 # Evaluation with caching
 # =============================================================================
 
+def _run_fold(fold_data: tuple) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run a single CV fold. Used by parallel CV."""
+    (train_idx, test_idx, ids, targets, features_dict, predictor_factory) = fold_data
+
+    # Reconstruct a simple cache-like object for the predictor
+    class SimpleCache:
+        def __init__(self, data: dict):
+            self._data = data
+        def __getitem__(self, key: str) -> np.ndarray:
+            return self._data[key]
+
+    cache = SimpleCache(features_dict)
+    predictor = predictor_factory()
+
+    train_ids = [ids[i] for i in train_idx]
+    test_ids = [ids[i] for i in test_idx]
+    train_y = targets[train_idx]
+
+    predictor.fit(train_ids, train_y, cache)
+    preds = predictor.predict(test_ids, cache)
+
+    return test_idx, preds, targets[test_idx]
+
+
 def cross_validate_cached(
     dataset: Dataset,
     cache: FeatureCache,
@@ -201,8 +225,22 @@ def cross_validate_cached(
     k: int = 5,
     seed: int = 42,
     task: str = "frame",
+    n_jobs: int = 1,
 ) -> dict:
-    """Run k-fold CV using cached features."""
+    """
+    Run k-fold CV using cached features.
+
+    Args:
+        dataset: Dataset with annotations
+        cache: FeatureCache with extracted features
+        predictor: Predictor instance (will be cloned for parallel execution)
+        k: Number of CV folds
+        seed: Random seed for reproducibility
+        task: 'frame' or 'quality'
+        n_jobs: Number of parallel jobs. 1=sequential, -1=all cores.
+                Note: If predictor uses all cores internally (e.g., HistGBM),
+                setting n_jobs>1 may cause resource contention.
+    """
     from sklearn.model_selection import KFold
 
     ids = [a.id for a in dataset.annotations]
@@ -216,14 +254,42 @@ def cross_validate_cached(
     all_preds = np.zeros(len(ids))
     all_gt = targets.copy()
 
-    for train_idx, test_idx in kf.split(ids):
-        train_ids = [ids[i] for i in train_idx]
-        test_ids = [ids[i] for i in test_idx]
-        train_y = targets[train_idx]
+    if n_jobs == 1:
+        # Sequential execution (default, most efficient for HistGBM)
+        for train_idx, test_idx in kf.split(ids):
+            train_ids = [ids[i] for i in train_idx]
+            test_ids = [ids[i] for i in test_idx]
+            train_y = targets[train_idx]
 
-        predictor.fit(train_ids, train_y, cache)
-        preds = predictor.predict(test_ids, cache)
-        all_preds[test_idx] = preds
+            predictor.fit(train_ids, train_y, cache)
+            preds = predictor.predict(test_ids, cache)
+            all_preds[test_idx] = preds
+    else:
+        # Parallel execution using joblib
+        from joblib import Parallel, delayed
+        import copy
+
+        # Extract features to dict (small, serializable)
+        features_dict = {sim_id: cache[sim_id] for sim_id in ids}
+
+        # Create a factory function that returns fresh predictor instances
+        def predictor_factory():
+            return copy.deepcopy(predictor)
+
+        # Prepare fold data
+        fold_data = [
+            (train_idx, test_idx, ids, targets, features_dict, predictor_factory)
+            for train_idx, test_idx in kf.split(ids)
+        ]
+
+        # Run folds in parallel
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_run_fold)(data) for data in fold_data
+        )
+
+        # Collect results
+        for test_idx, preds, _ in results:
+            all_preds[test_idx] = preds
 
     return {
         'predictions': all_preds,
