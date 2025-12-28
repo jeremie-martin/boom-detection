@@ -160,11 +160,45 @@ Tested pipeline: Quality filter → Frame detector (trained on high-quality)
 | Frame Detection | HistGBM | MAE 18.9, Within 10: 51% |
 | Quality Prediction | Ridge boom-aware | MAE 0.182, Corr: 0.491 |
 
+## Phase 6: Model Agreement Analysis
+
+### Key Discovery
+**Model agreement is a powerful confidence indicator** - more useful than quality prediction!
+
+### Findings
+
+| Metric | Agreement Cases (n=36) | Disagreement Cases (n=13) |
+|--------|------------------------|---------------------------|
+| CNN MAE | 8.8 frames | 38.0 frames |
+| HistGBM MAE | 8.1 frames | 48.7 frames |
+| Average MAE | 8.2 frames | - |
+
+**Critical insight**: When CNN and HistGBM agree within 10 frames, we achieve MAE 8.2 - close to our target of <5!
+
+### Correlations
+- Model disagreement vs Quality: **Spearman -0.498** (p=0.0003) - highly significant
+- Model disagreement vs Error: Strong positive correlation
+
+### Why Simple Averaging Fails
+- Ensemble (mean of CNN + HistGBM): MAE 17.4 (worse than CNN alone at 16.6)
+- Models are not symmetrically wrong - they fail differently on different samples
+- Need confidence-aware weighting, not equal weights
+
+### Recommended Strategy
+1. **When models agree (<10 frames)**: Use weighted average → MAE ~8
+2. **When models disagree (>10 frames)**: Use specialized approach or flag as uncertain
+
+### Implications for Architecture
+- The problem has **inherent structure**: 73% "easy" cases, 27% "hard" cases
+- Path to MAE <5 isn't uniform improvement:
+  1. Nail easy cases: 8.2 → 5 frames (need fine-tuning)
+  2. Handle hard cases differently (specialized model or abstention)
+
 ## Next Steps
 
-1. **Better clustering**: Use actual k-means or GMM instead of median-split
-2. **Velocity features**: Track cluster centroid velocities, detect approach
-3. **Temporal patterns**: Look for specific sequence signatures (separate→approach→merge)
-4. **Ensemble**: Combine CNN + HistGBM + convergence detector
-5. **Quality as confidence**: Use predicted quality as confidence score, not filter
-6. **Weighted loss**: Train with higher weight on high-quality samples
+1. **Confidence-weighted ensemble**: Learn optimal weights based on agreement
+2. **Three-model ensemble**: Add third model for median voting (more robust)
+3. **Local refinement**: Coarse prediction → fine-tune in ±20 frame window
+4. **Quality-stratified models**: Train separate models for high/low quality
+5. **Feature selection**: Focus on most predictive of 1365 features
+6. **Attention mechanisms**: Let model focus on boom region
