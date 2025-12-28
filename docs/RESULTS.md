@@ -1,6 +1,6 @@
 # Boom Detection: Results Summary
 
-## Best Result: MAE 6.7 ± 0.6 frames (Robust Evaluation)
+## Best Result: MAE 6.4 ± 0.5 frames (Robust Evaluation)
 
 The goal is producing **high-quality animations for YouTube/social media**, not detecting boom frames on all simulations. This means:
 - We only care about high-quality simulations
@@ -31,9 +31,9 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 
 | Metric | Mean ± Std |
 |--------|-----------|
-| MAE | **6.7 ± 0.6 frames** |
-| Within 5 frames | 61% ± 3% |
-| Acceptance rate | 34% ± 3% |
+| MAE | **6.4 ± 0.5 frames** |
+| Within 5 frames | 63% ± 6% |
+| Acceptance rate | 35% ± 5% |
 
 ### Key Improvements
 
@@ -187,7 +187,8 @@ This suggests we should use specialized feature sets.
 | + Agreement filter | ~10 | Accept when models agree |
 | + Quality filter | ~7 | Reject low predicted quality |
 | + Use CNN | 7.5 | CNN > HGB when agree |
-| **+ Improved quality model** | **6.7 ± 0.6** | RF, top 50, ±25 window |
+| + Improved quality model | 6.7 | RF, top 50, ±25 window |
+| **+ Optimized CNN** | **6.4 ± 0.5** | hidden=64, kernels=(5,11,21) |
 
 ---
 

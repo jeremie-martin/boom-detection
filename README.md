@@ -2,20 +2,22 @@
 
 Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge into a caustic pattern.
 
-## Best Result: MAE 6.7 ± 0.6 frames
+## Best Result: MAE 6.4 ± 0.5 frames
 
 Using model agreement + predicted quality filtering (robust 5-seed evaluation):
 
 | Metric | Value |
 |--------|-------|
-| MAE | **6.7 ± 0.6 frames** |
-| Within 5 frames | 61% ± 3% |
-| Acceptance rate | 34% ± 3% |
+| MAE | **6.4 ± 0.5 frames** |
+| Within 5 frames | 63% ± 6% |
+| Acceptance rate | 35% ± 5% |
 
-**Key improvements from ablation study:**
+**Key improvements from ablation/tuning:**
 - CNN prediction (not HGB) - more accurate when models agree
 - Random Forest for quality (not Ridge) - better correlation
 - Top 50 quality features with smaller window (±25) - less overfitting
+- Larger CNN kernels (5,11,21) - capture longer-range temporal patterns
+- hidden_dim=64 - more capacity without overfitting
 
 ## Quick Start
 

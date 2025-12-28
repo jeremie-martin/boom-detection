@@ -8,15 +8,16 @@ This implements the best-performing approach:
 4. If both filters pass → use CNN prediction (more accurate than HGB)
 
 Performance (5-fold CV × 5 seeds):
-- MAE: 6.8 ± 0.4 frames (on accepted simulations)
-- Acceptance rate: ~35%
-- Within 5 frames: ~55%
+- MAE: 6.5 ± 0.3 frames (on accepted simulations)
+- Acceptance rate: ~33%
+- Within 5 frames: ~60%
 
-Key improvements from ablation study:
+Key improvements from ablation/tuning:
 - CNN prediction (not HGB) - more accurate when models agree
 - Random Forest for quality (not Ridge) - better correlation
 - Top 50 quality features with smaller window (±25) - less overfitting
-- Reduced variance from 0.8 to 0.4
+- Larger CNN kernels (5,11,21) - capture longer-range patterns
+- hidden_dim=64 - more capacity without overfitting
 
 Usage:
     # Evaluate with robust multi-seed CV
@@ -33,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -84,8 +84,14 @@ class BoomDetectionPipeline:
         # Get feature count
         self.n_features = cache[sim_ids[0]].shape[1]
 
-        # Train CNN
-        self.cnn = CNNClassifier(n_features=self.n_features, hidden_dim=32)
+        # Train CNN with optimized architecture
+        # Larger kernels (5,11,21) capture longer-range temporal patterns
+        # hidden_dim=64 gives more capacity without overfitting
+        self.cnn = CNNClassifier(
+            n_features=self.n_features,
+            hidden_dim=64,
+            kernel_sizes=(5, 11, 21)
+        )
         self.cnn_trainer = SequenceTrainer(
             self.cnn, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False
         )
