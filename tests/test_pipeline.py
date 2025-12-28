@@ -61,11 +61,19 @@ class TestPipelineConfig:
     def test_default_thresholds(self):
         """Default thresholds should match documented values."""
         pipeline = BoomDetectionPipeline()
-        assert pipeline.accept_threshold == 0.5
+        assert pipeline.accept_threshold == 0.60  # Increased to compensate for overconfidence
         assert pipeline.agreement_weight == 0.4
         assert pipeline.quality_weight == 0.6
+        assert pipeline.agreement_formula == 'linear'
+        assert pipeline.agreement_scale == 10.0  # Default for linear
         assert pipeline.quality_window == 25
         assert pipeline.n_quality_features == 50
+
+    def test_sqrt_agreement_defaults(self):
+        """Sqrt agreement formula should use scale 15 by default."""
+        pipeline = BoomDetectionPipeline(agreement_formula='sqrt')
+        assert pipeline.agreement_formula == 'sqrt'
+        assert pipeline.agreement_scale == 15.0  # Default for sqrt
 
     def test_custom_thresholds(self):
         """Custom thresholds should be stored correctly."""

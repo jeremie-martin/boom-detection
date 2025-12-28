@@ -24,12 +24,14 @@ Usage:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING
 
 import numpy as np
 
 from .loader import Simulation, X1, Y1, X2, Y2, TH1, TH2, W1, W2
+from .logging_config import logger
 
 if TYPE_CHECKING:
     from .loader import Dataset
@@ -937,31 +939,33 @@ class FeatureCache:
             self._id_to_sim[sim_id] = sim
             to_process.append((sim_id, sim))
 
-        if loaded_from_disk > 0 and verbose:
-            print(f"Loaded {loaded_from_disk} simulations from disk cache")
+        if loaded_from_disk > 0:
+            logger.info("Loaded {} simulations from disk cache", loaded_from_disk)
 
         if not to_process:
-            if verbose and loaded_from_disk == 0:
-                print("All features already cached")
+            if loaded_from_disk == 0:
+                logger.info("All features already cached")
             return
 
         total = len(to_process)
         if n_jobs is None:
             n_jobs = min(os.cpu_count() or 1, total)
 
-        if verbose:
-            print(f"Extracting features for {total} simulations using {n_jobs} workers...")
+        logger.info("Extracting features for {} simulations using {} workers...", total, n_jobs)
+        start_time = time.time()
 
         def extract_one(item):
             sim_id, sim = item
+            t0 = time.time()
             features = self.extractor.transform(sim)
+            logger.debug("Extracted {} in {:.2f}s: {} frames, {} features",
+                        sim_id, time.time() - t0, features.shape[0], features.shape[1])
             return sim_id, features
 
         if n_jobs == 1:
             # Sequential (for debugging)
             for i, (sim_id, sim) in enumerate(to_process):
-                if verbose:
-                    print(f"  {i+1}/{total}: {sim_id}")
+                logger.debug("Processing {}/{}: {}", i+1, total, sim_id)
                 features = self.extractor.transform(sim)
                 self._cache[sim_id] = features
                 self._save_to_disk(sim_id, features)
@@ -975,11 +979,15 @@ class FeatureCache:
                     self._cache[sim_id] = features
                     self._save_to_disk(sim_id, features)
                     done += 1
-                    if verbose and done % 10 == 0:
-                        print(f"  {done}/{total} done")
+                    if done % 10 == 0:
+                        elapsed = time.time() - start_time
+                        rate = done / elapsed
+                        eta = (total - done) / rate if rate > 0 else 0
+                        logger.info("  {}/{} done ({:.1f}/s, ETA: {:.0f}s)", done, total, rate, eta)
 
-        if verbose:
-            print(f"Cached features for {len(self._cache)} simulations")
+        elapsed = time.time() - start_time
+        logger.info("Feature extraction complete: {} simulations in {:.1f}s ({:.2f}s/sim)",
+                   len(self._cache), elapsed, elapsed / total if total > 0 else 0)
 
     def extract_single(self, sim_id: str, simulation: 'Simulation') -> np.ndarray:
         """Extract and cache features for a single simulation."""

@@ -21,12 +21,15 @@ Usage:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, TYPE_CHECKING
 
 import numpy as np
 from scipy import stats
 from sklearn.model_selection import KFold
+
+from .logging_config import logger
 
 # Import core metrics and types (no sklearn dependency)
 from .metrics import (
@@ -495,17 +498,23 @@ class CachedEvaluator:
         targets = self.boom_frames if task == "frame" else self.boom_qualities
         seed_results = []
 
+        logger.info("Starting {}-fold CV with {} seeds on {} samples",
+                   k, len(seeds), len(self.sim_ids))
+        total_start = time.time()
+
         for seed_idx, seed in enumerate(seeds):
-            if verbose:
-                print(f"\n{'='*50}")
-                print(f"Seed {seed} ({seed_idx + 1}/{len(seeds)})")
-                print('='*50)
+            logger.info("Seed {} ({}/{})", seed, seed_idx + 1, len(seeds))
+            seed_start = time.time()
 
             # Run single-seed CV
             result = self._cross_validate_single_seed(
                 predictor_fn, k=k, seed=seed, targets=targets, task=task, verbose=verbose
             )
             seed_results.append(result)
+
+            seed_elapsed = time.time() - seed_start
+            logger.info("Seed {} complete in {:.1f}s (MAE: {:.2f})",
+                       seed, seed_elapsed, result.mean_metrics['mae'])
 
         multi_result = MultiSeedResult(
             task=task,
@@ -537,6 +546,8 @@ class CachedEvaluator:
         fold_results = []
 
         for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.sim_ids)):
+            fold_start = time.time()
+
             # Derive fold-specific seed for model training
             fold_seed = seed * 1000 + fold_idx
 
@@ -547,17 +558,22 @@ class CachedEvaluator:
             test_y = targets[test_idx]
 
             # Create fresh predictor and train
+            logger.debug("  Fold {}/{}: training on {} samples...", fold_idx + 1, k, len(train_ids))
             predictor = predictor_fn()
 
             # Pass fold seed if the predictor supports it
             if hasattr(predictor, 'set_seed'):
                 predictor.set_seed(fold_seed)
 
+            train_start = time.time()
             predictor.fit(train_ids, train_y, self.cache)
+            train_time = time.time() - train_start
 
             # Predict
+            pred_start = time.time()
             predictions = predictor.predict(test_ids, self.cache)
             predictions = np.asarray(predictions)
+            pred_time = time.time() - pred_start
 
             # Compute metrics
             metrics = compute_all_metrics(test_y, predictions, task=task)
@@ -571,8 +587,9 @@ class CachedEvaluator:
                 metrics=metrics,
             ))
 
-            if verbose:
-                print(f"  Fold {fold_idx + 1}/{k}: MAE={metrics['mae']:.2f}")
+            fold_elapsed = time.time() - fold_start
+            logger.debug("  Fold {}/{}: MAE={:.2f} (train: {:.1f}s, pred: {:.1f}s, total: {:.1f}s)",
+                        fold_idx + 1, k, metrics['mae'], train_time, pred_time, fold_elapsed)
 
         return EvaluationResult(
             task=task,

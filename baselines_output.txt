@@ -1,0 +1,4 @@
+/home/holo/prog/boom-detection/.venv/lib/python3.12/site-packages/scipy/_lib/_util.py:1233: LinAlgWarning: Ill-conditioned matrix (rcond=2.67501e-11): result may not be accurate.
+  return f(*arrays, *other_args, **kwargs)
+/home/holo/prog/boom-detection/.venv/lib/python3.12/site-packages/scipy/_lib/_util.py:1233: LinAlgWarning: Ill-conditioned matrix (rcond=3.10114e-11): result may not be accurate.
+  return f(*arrays, *other_args, **kwargs)

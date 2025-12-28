@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegress
 
 from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
+from .logging_config import logger
 from .metrics import SelectivePrediction
 from .sequence_models import CNNClassifier, SequenceTrainer
 
@@ -59,9 +61,11 @@ class BoomDetectionPipeline:
 
     def __init__(
         self,
-        accept_threshold: float = 0.5,  # Threshold on accept_score
+        accept_threshold: float = 0.60,  # Threshold on accept_score (increased from 0.5 to compensate for overconfidence)
         agreement_weight: float = 0.4,  # Weight for agreement in accept_score
         quality_weight: float = 0.6,  # Weight for quality in accept_score
+        agreement_formula: str = 'linear',  # 'linear' or 'sqrt'
+        agreement_scale: float | None = None,  # Scale for agreement (default: 10 for linear, 15 for sqrt)
         quality_window: int = 25,  # Smaller window works better
         n_quality_features: int = 50,  # Top correlated features
         seed: int | None = None,  # Random seed for reproducibility
@@ -70,6 +74,12 @@ class BoomDetectionPipeline:
         self.accept_threshold = accept_threshold
         self.agreement_weight = agreement_weight
         self.quality_weight = quality_weight
+        self.agreement_formula = agreement_formula
+        # Default scale depends on formula
+        if agreement_scale is None:
+            self.agreement_scale = 15.0 if agreement_formula == 'sqrt' else 10.0
+        else:
+            self.agreement_scale = agreement_scale
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
         self.seed = seed
@@ -96,6 +106,9 @@ class BoomDetectionPipeline:
         cache: FeatureCache,
     ) -> None:
         """Train all models on the given data."""
+        fit_start = time.time()
+        logger.info("Training pipeline on {} simulations...", len(sim_ids))
+
         # Get feature count
         self.n_features = cache[sim_ids[0]].shape[1]
 
@@ -107,6 +120,8 @@ class BoomDetectionPipeline:
         # Train CNN with optimized architecture
         # Larger kernels (5,11,21) capture longer-range temporal patterns
         # hidden_dim=64 gives more capacity without overfitting
+        logger.debug("Training CNN (hidden_dim=64, kernels=5,11,21)...")
+        cnn_start = time.time()
         self.cnn = CNNClassifier(
             n_features=self.n_features,
             hidden_dim=64,
@@ -117,8 +132,10 @@ class BoomDetectionPipeline:
             seed=cnn_seed,
         )
         self.cnn_trainer.fit(sim_ids, boom_frames, cache)
+        logger.debug("CNN trained in {:.1f}s", time.time() - cnn_start)
 
         # Train HistGBM
+        logger.debug("Training HistGBM...")
         X_train, y_train = [], []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
@@ -126,12 +143,15 @@ class BoomDetectionPipeline:
                 X_train.append(feats[t])
                 y_train.append(1 if t >= boom else 0)
 
+        hgb_start = time.time()
         self.hgb = HistGradientBoostingClassifier(
             max_iter=200, max_depth=7, random_state=hgb_seed
         )
         self.hgb.fit(np.array(X_train), np.array(y_train))
+        logger.debug("HistGBM trained in {:.1f}s on {} frame samples", time.time() - hgb_start, len(X_train))
 
         # Train quality predictor with feature selection
+        logger.debug("Training quality predictor...")
         # IMPORTANT: Add jitter to boom frame during training to simulate prediction noise
         # This prevents train/inference mismatch since at inference we use predicted boom
         jitter_std = 5  # Standard deviation of jitter (typical CNN/HGB error is ~5-10 frames)
@@ -187,6 +207,10 @@ class BoomDetectionPipeline:
                 y_min=0.0, y_max=1.0, out_of_bounds='clip'
             )
             self.quality_calibrator.fit(raw_predictions, qualities)
+            logger.debug("Quality calibrator fitted")
+
+        total_time = time.time() - fit_start
+        logger.info("Pipeline training complete in {:.1f}s", total_time)
 
     def predict_one(self, features: np.ndarray) -> SelectivePrediction:
         """
@@ -262,8 +286,13 @@ class BoomDetectionPipeline:
             predicted_quality = float(np.clip(raw_quality, 0, 1))
 
         # Compute accept_score: single scalar combining agreement and quality
-        # agreement_score: 1.0 = perfect agreement, 0.0 = disagreement >= 10 frames
-        agreement_score = 1.0 - min(disagreement / 10.0, 1.0)
+        # agreement_score: 1.0 = perfect agreement, 0.0 = disagreement >= scale frames
+        if self.agreement_formula == 'sqrt':
+            # sqrt formula: 1 - sqrt(min(diff/scale, 1.0))
+            agreement_score = 1.0 - np.sqrt(min(disagreement / self.agreement_scale, 1.0))
+        else:
+            # linear formula: 1 - min(diff/scale, 1.0)
+            agreement_score = 1.0 - min(disagreement / self.agreement_scale, 1.0)
 
         # Weighted combination (weights sum to 1.0)
         accept_score = (
@@ -331,6 +360,8 @@ class BoomDetectionPipeline:
             'accept_threshold': self.accept_threshold,
             'agreement_weight': self.agreement_weight,
             'quality_weight': self.quality_weight,
+            'agreement_formula': self.agreement_formula,
+            'agreement_scale': self.agreement_scale,
             'quality_window': self.quality_window,
             'n_quality_features': self.n_quality_features,
             'n_features': self.n_features,
@@ -363,9 +394,11 @@ class BoomDetectionPipeline:
 
         # Create pipeline with saved config
         pipeline = cls(
-            accept_threshold=config.get('accept_threshold', 0.5),
+            accept_threshold=config.get('accept_threshold', 0.60),
             agreement_weight=config.get('agreement_weight', 0.4),
             quality_weight=config.get('quality_weight', 0.6),
+            agreement_formula=config.get('agreement_formula', 'linear'),
+            agreement_scale=config.get('agreement_scale'),  # None triggers default
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
