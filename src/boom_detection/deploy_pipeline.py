@@ -39,11 +39,10 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import spearmanr
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegressor
-from sklearn.model_selection import KFold
 
 from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
-from .evaluation import SelectivePrediction, compute_selective_metrics
+from .evaluation import SelectivePrediction
 from .sequence_models import CNNClassifier, SequenceTrainer
 
 
@@ -60,19 +59,28 @@ class BoomDetectionPipeline:
         quality_threshold: float = 0.55,
         quality_window: int = 25,  # Smaller window works better
         n_quality_features: int = 50,  # Top correlated features
+        seed: int | None = None,  # Random seed for reproducibility
+        calibrate_quality: bool = True,  # Calibrate quality predictions
     ):
         self.agreement_threshold = agreement_threshold
         self.quality_threshold = quality_threshold
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
+        self.seed = seed
+        self.calibrate_quality = calibrate_quality
 
         # Models (set during training)
         self.cnn = None
         self.cnn_trainer = None
         self.hgb = None
         self.quality_model = None
+        self.quality_calibrator = None  # Optional isotonic regression calibrator
         self.quality_feature_indices = None  # Top features for quality
         self.n_features = None
+
+    def set_seed(self, seed: int) -> None:
+        """Set the random seed for reproducibility."""
+        self.seed = seed
 
     def fit(
         self,
@@ -85,6 +93,11 @@ class BoomDetectionPipeline:
         # Get feature count
         self.n_features = cache[sim_ids[0]].shape[1]
 
+        # Derive seeds for each model component (deterministic from self.seed)
+        cnn_seed = self.seed
+        hgb_seed = (self.seed + 1000) if self.seed is not None else 42
+        quality_seed = (self.seed + 2000) if self.seed is not None else 42
+
         # Train CNN with optimized architecture
         # Larger kernels (5,11,21) capture longer-range temporal patterns
         # hidden_dim=64 gives more capacity without overfitting
@@ -94,7 +107,8 @@ class BoomDetectionPipeline:
             kernel_sizes=(5, 11, 21)
         )
         self.cnn_trainer = SequenceTrainer(
-            self.cnn, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False
+            self.cnn, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+            seed=cnn_seed,
         )
         self.cnn_trainer.fit(sim_ids, boom_frames, cache)
 
@@ -107,16 +121,25 @@ class BoomDetectionPipeline:
                 y_train.append(1 if t >= boom else 0)
 
         self.hgb = HistGradientBoostingClassifier(
-            max_iter=200, max_depth=7, random_state=42
+            max_iter=200, max_depth=7, random_state=hgb_seed
         )
         self.hgb.fit(np.array(X_train), np.array(y_train))
 
         # Train quality predictor with feature selection
+        # IMPORTANT: Add jitter to boom frame during training to simulate prediction noise
+        # This prevents train/inference mismatch since at inference we use predicted boom
+        jitter_std = 5  # Standard deviation of jitter (typical CNN/HGB error is ~5-10 frames)
+        rng = np.random.RandomState(quality_seed)
+
         X_qual = []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
-            start = max(0, int(boom) - self.quality_window)
-            end = min(len(feats), int(boom) + self.quality_window)
+            # Add jitter to boom frame to simulate prediction uncertainty
+            jittered_boom = int(boom + rng.normal(0, jitter_std))
+            jittered_boom = max(0, min(jittered_boom, len(feats) - 1))
+
+            start = max(0, jittered_boom - self.quality_window)
+            end = min(len(feats), jittered_boom + self.quality_window)
             X_qual.append(feats[start:end].mean(axis=0))
         X_qual = np.array(X_qual)
 
@@ -131,11 +154,35 @@ class BoomDetectionPipeline:
         # Train on selected features using Random Forest
         X_qual_selected = X_qual[:, self.quality_feature_indices]
         self.quality_model = RandomForestRegressor(
-            n_estimators=50, max_depth=5, random_state=42
+            n_estimators=50, max_depth=5, random_state=quality_seed
         )
         self.quality_model.fit(X_qual_selected, qualities)
 
-    def predict_one(self, features: np.ndarray) -> dict:
+        # Optional: Calibrate quality predictions using isotonic regression
+        # This makes the predicted quality match the empirical probability
+        if self.calibrate_quality:
+            from sklearn.isotonic import IsotonicRegression
+
+            # Get out-of-bag predictions for calibration
+            # Use leave-one-out since we have few samples
+            raw_predictions = np.zeros(len(qualities))
+            for i in range(len(X_qual_selected)):
+                # Train on all except i
+                mask = np.ones(len(X_qual_selected), dtype=bool)
+                mask[i] = False
+                temp_model = RandomForestRegressor(
+                    n_estimators=50, max_depth=5, random_state=quality_seed
+                )
+                temp_model.fit(X_qual_selected[mask], qualities[mask])
+                raw_predictions[i] = temp_model.predict([X_qual_selected[i]])[0]
+
+            # Fit isotonic regression calibrator
+            self.quality_calibrator = IsotonicRegression(
+                y_min=0.0, y_max=1.0, out_of_bounds='clip'
+            )
+            self.quality_calibrator.fit(raw_predictions, qualities)
+
+    def predict_one(self, features: np.ndarray) -> SelectivePrediction:
         """
         Predict boom frame for a single simulation.
 
@@ -143,13 +190,14 @@ class BoomDetectionPipeline:
             features: Shape (frames, n_features)
 
         Returns:
-            dict with keys:
+            SelectivePrediction with:
                 - boom_frame: Predicted boom frame (or None if rejected)
                 - accepted: Whether simulation passed filters
                 - cnn_pred: CNN prediction
                 - hgb_pred: HGB prediction
                 - disagreement: |CNN - HGB|
                 - predicted_quality: Quality prediction
+                - confidence: Combined confidence score
 
         Raises:
             TypeError: If features is not a numpy array
@@ -197,9 +245,15 @@ class BoomDetectionPipeline:
         window_feats = features[start:end].mean(axis=0)
         # Use selected features
         window_feats_selected = window_feats[self.quality_feature_indices]
-        predicted_quality = float(np.clip(
-            self.quality_model.predict([window_feats_selected])[0], 0, 1
-        ))
+        raw_quality = float(self.quality_model.predict([window_feats_selected])[0])
+
+        # Apply calibration if available
+        if self.quality_calibrator is not None:
+            predicted_quality = float(np.clip(
+                self.quality_calibrator.predict([raw_quality])[0], 0, 1
+            ))
+        else:
+            predicted_quality = float(np.clip(raw_quality, 0, 1))
 
         # Apply filters
         accepted = (
@@ -207,18 +261,139 @@ class BoomDetectionPipeline:
             predicted_quality >= self.quality_threshold
         )
 
-        return {
-            'boom_frame': cnn_pred if accepted else None,  # CNN is more accurate
-            'accepted': accepted,
-            'cnn_pred': cnn_pred,
-            'hgb_pred': hgb_pred,
-            'disagreement': disagreement,
-            'predicted_quality': predicted_quality,
-        }
+        # Compute confidence score (higher = more confident)
+        # Normalize disagreement to [0, 1] and combine with quality
+        agreement_score = 1.0 - min(disagreement / 10.0, 1.0)  # 0-10 frames -> 1-0
+        confidence = (agreement_score + predicted_quality) / 2.0
 
-    def predict(self, sim_ids: list[str], cache: FeatureCache) -> list[dict]:
+        return SelectivePrediction(
+            boom_frame=cnn_pred if accepted else None,  # CNN is more accurate
+            accepted=accepted,
+            cnn_pred=cnn_pred,
+            hgb_pred=hgb_pred,
+            disagreement=disagreement,
+            predicted_quality=predicted_quality,
+            confidence=confidence,
+        )
+
+    def predict(self, sim_ids: list[str], cache: FeatureCache) -> list[SelectivePrediction]:
         """Predict for multiple simulations."""
         return [self.predict_one(cache[sid]) for sid in sim_ids]
+
+    def predict_dict(self, sim_ids: list[str], cache: FeatureCache) -> list[dict]:
+        """Predict for multiple simulations, returning dicts (for backward compatibility)."""
+        return [self.predict_one(cache[sid]).to_dict() for sid in sim_ids]
+
+    def save(self, path: Path) -> None:
+        """
+        Save the pipeline to a directory.
+
+        Creates:
+            path/cnn.pt - CNN model weights
+            path/hgb.joblib - HistGBM model
+            path/quality.joblib - Quality model
+            path/config.json - Pipeline configuration
+
+        Args:
+            path: Directory to save to
+        """
+        import torch
+        import joblib
+
+        if self.cnn is None:
+            raise RuntimeError("Pipeline not fitted. Call fit() first.")
+
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # Save CNN
+        torch.save({
+            'state_dict': self.cnn.state_dict(),
+            'n_features': self.n_features,
+            'hidden_dim': self.cnn.branch_dim * self.cnn.n_branches,
+            'n_branches': self.cnn.n_branches,
+        }, path / 'cnn.pt')
+
+        # Save HGB and quality model
+        joblib.dump(self.hgb, path / 'hgb.joblib')
+        joblib.dump(self.quality_model, path / 'quality.joblib')
+        if self.quality_calibrator is not None:
+            joblib.dump(self.quality_calibrator, path / 'quality_calibrator.joblib')
+
+        # Save config
+        config = {
+            'agreement_threshold': self.agreement_threshold,
+            'quality_threshold': self.quality_threshold,
+            'quality_window': self.quality_window,
+            'n_quality_features': self.n_quality_features,
+            'n_features': self.n_features,
+            'quality_feature_indices': self.quality_feature_indices,
+            'calibrate_quality': self.calibrate_quality,
+        }
+        with open(path / 'config.json', 'w') as f:
+            json.dump(config, f, indent=2)
+
+    @classmethod
+    def from_pretrained(cls, path: Path, device: str = 'auto') -> 'BoomDetectionPipeline':
+        """
+        Load a pretrained pipeline from a directory.
+
+        Args:
+            path: Directory containing saved models
+            device: Device for CNN ('auto', 'cuda', 'cpu')
+
+        Returns:
+            Loaded BoomDetectionPipeline ready for inference
+        """
+        import torch
+        import joblib
+
+        path = Path(path)
+
+        # Load config
+        with open(path / 'config.json') as f:
+            config = json.load(f)
+
+        # Create pipeline with saved config
+        pipeline = cls(
+            agreement_threshold=config['agreement_threshold'],
+            quality_threshold=config['quality_threshold'],
+            quality_window=config['quality_window'],
+            n_quality_features=config['n_quality_features'],
+            calibrate_quality=config.get('calibrate_quality', False),
+        )
+
+        pipeline.n_features = config['n_features']
+        pipeline.quality_feature_indices = config['quality_feature_indices']
+
+        # Load CNN
+        checkpoint = torch.load(path / 'cnn.pt', map_location='cpu', weights_only=True)
+        pipeline.cnn = CNNClassifier(
+            n_features=checkpoint['n_features'],
+            hidden_dim=checkpoint.get('hidden_dim', 64),
+            kernel_sizes=(5, 11, 21),  # Default architecture
+        )
+        pipeline.cnn.load_state_dict(checkpoint['state_dict'])
+
+        # Set up device
+        if device == 'auto':
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        pipeline.cnn = pipeline.cnn.to(device)
+        pipeline.cnn.eval()
+
+        # Create minimal trainer for device tracking
+        pipeline.cnn_trainer = SequenceTrainer(pipeline.cnn, device=device)
+
+        # Load sklearn models
+        pipeline.hgb = joblib.load(path / 'hgb.joblib')
+        pipeline.quality_model = joblib.load(path / 'quality.joblib')
+
+        # Load calibrator if available
+        calibrator_path = path / 'quality_calibrator.joblib'
+        if calibrator_path.exists():
+            pipeline.quality_calibrator = joblib.load(calibrator_path)
+
+        return pipeline
 
 
 def cross_validate(
@@ -235,6 +410,15 @@ def cross_validate(
     """
     Run robust multi-seed cross-validation using the unified evaluation framework.
 
+    This is a convenience wrapper around CachedEvaluator.cross_validate_selective()
+    that returns a backward-compatible dict format.
+
+    For new code, prefer using CachedEvaluator directly:
+        evaluator = CachedEvaluator(dataset, cache)
+        result = evaluator.cross_validate_selective(
+            lambda: BoomDetectionPipeline(agreement_threshold=5),
+        )
+
     Args:
         sim_ids: List of simulation IDs
         boom_frames: Ground truth boom frames
@@ -249,85 +433,60 @@ def cross_validate(
     Returns:
         Dict with metrics including mean ± std across seeds
     """
+    from .evaluation import CachedEvaluator, MultiSeedSelectiveResult
+
     if seeds is None:
         seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
 
-    all_seed_metrics = []
+    # Create a minimal dataset structure for the evaluator
+    class MinimalDataset:
+        def __init__(self, sim_ids, booms, quals):
+            from dataclasses import dataclass
 
-    for seed_idx, seed in enumerate(seeds):
-        if verbose:
-            print(f"\nSeed {seed} ({seed_idx + 1}/{len(seeds)})")
+            @dataclass
+            class MinimalAnnotation:
+                id: str
+                boom_frame: int
+                boom_quality: float
 
-        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        seed_predictions: list[SelectivePrediction] = []
-        seed_true_booms: list[int] = []
-        seed_true_quals: list[float] = []
+            self.annotations = [
+                MinimalAnnotation(sid, int(b), float(q))
+                for sid, b, q in zip(sim_ids, booms, quals)
+            ]
 
-        for _fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
-            train_ids = [sim_ids[i] for i in train_idx]
-            test_ids = [sim_ids[i] for i in test_idx]
-            train_booms = boom_frames[train_idx]
-            train_quals = qualities[train_idx]
+    dataset = MinimalDataset(sim_ids, boom_frames, qualities)
+    evaluator = CachedEvaluator(dataset, cache)
 
-            # Train pipeline
-            pipeline = BoomDetectionPipeline(
-                agreement_threshold=agreement_threshold,
-                quality_threshold=quality_threshold,
-            )
-            pipeline.fit(train_ids, train_booms, train_quals, cache)
+    # Use the unified evaluator
+    result: MultiSeedSelectiveResult = evaluator.cross_validate_selective(
+        lambda: BoomDetectionPipeline(
+            agreement_threshold=agreement_threshold,
+            quality_threshold=quality_threshold,
+        ),
+        k=n_splits,
+        seeds=seeds,
+        verbose=verbose,
+    )
 
-            # Predict and convert to SelectivePrediction
-            results = pipeline.predict(test_ids, cache)
-            for res in results:
-                seed_predictions.append(SelectivePrediction.from_dict(res))
-
-            seed_true_booms.extend(boom_frames[test_idx].tolist())
-            seed_true_quals.extend(qualities[test_idx].tolist())
-
-        # Compute metrics using unified framework
-        metrics = compute_selective_metrics(
-            seed_predictions,
-            np.array(seed_true_booms),
-            np.array(seed_true_quals),
-        )
-        all_seed_metrics.append(metrics)
-
-        if verbose:
-            mae = metrics['selective_mae']
-            n_acc = metrics['n_accepted']
-            n_tot = metrics['n_total']
-            print(f"  MAE: {mae:.2f}, Accepted: {n_acc}/{n_tot}")
-
-    # Aggregate across seeds
-    metric_names = ['selective_mae', 'selective_within_5', 'coverage']
-    mean_metrics = {}
-    std_metrics = {}
-
-    for name in metric_names:
-        values = [m[name] for m in all_seed_metrics if not np.isnan(m.get(name, float('nan')))]
-        if values:
-            mean_metrics[name] = float(np.mean(values))
-            std_metrics[name] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
-        else:
-            mean_metrics[name] = float('nan')
-            std_metrics[name] = 0.0
-
+    # Convert to backward-compatible dict format
     return {
         'n_seeds': len(seeds),
         'n_splits': n_splits,
         'seeds': seeds,
         # Main metrics with uncertainty (backward compatible names)
-        'mae_mean': mean_metrics.get('selective_mae', float('nan')),
-        'mae_std': std_metrics.get('selective_mae', 0.0),
-        'within_5_mean': mean_metrics.get('selective_within_5', float('nan')) * 100,
-        'within_5_std': std_metrics.get('selective_within_5', 0.0) * 100,
-        'acceptance_rate_mean': mean_metrics.get('coverage', 0.0) * 100,
-        'acceptance_rate_std': std_metrics.get('coverage', 0.0) * 100,
+        'mae_mean': result.mean_metrics.get('selective_mae', float('nan')),
+        'mae_std': result.std_metrics.get('selective_mae', 0.0),
+        'within_5_mean': result.mean_metrics.get('selective_within_5', float('nan')) * 100,
+        'within_5_std': result.std_metrics.get('selective_within_5', 0.0) * 100,
+        'acceptance_rate_mean': result.mean_metrics.get('coverage', 0.0) * 100,
+        'acceptance_rate_std': result.std_metrics.get('coverage', 0.0) * 100,
         # Per-seed results for analysis
-        'seed_metrics': all_seed_metrics,
+        'seed_metrics': result.seed_metrics,
         # Config
         'agreement_threshold': agreement_threshold,
         'quality_threshold': quality_threshold,
+        # Also expose the full result object for new code
+        '_result': result,
     }
 
 
@@ -342,6 +501,10 @@ def main():
     parser.add_argument('--quality', type=float, default=0.55, help='Quality threshold')
     parser.add_argument('--production', action='store_true',
                         help='Use PRODUCTION_CONFIG with caustic features (recommended)')
+    parser.add_argument('--save-run', type=Path, default=None,
+                        help='Save evaluation results to directory (auto-named if "auto")')
+    parser.add_argument('--predict', type=Path, default=None,
+                        help='Path to trained models for inference')
     args = parser.parse_args()
 
     # Load data
@@ -385,10 +548,10 @@ def main():
 
         if args.quick:
             # Single seed - just show the values
-            r = results['seed_results'][0]
-            print(f"MAE: {r['mae']:.2f} frames")
-            print(f"Within 5 frames: {r['within_5']:.1f}%")
-            print(f"Acceptance rate: {r['acceptance_rate']:.1f}%")
+            r = results['seed_metrics'][0]
+            print(f"MAE: {r['selective_mae']:.2f} frames")
+            print(f"Within 5 frames: {r['selective_within_5']*100:.1f}%")
+            print(f"Acceptance rate: {r['coverage']*100:.1f}%")
             print()
             print("Note: This is a quick single-seed result. For robust evaluation,")
             print("      run without --quick to get mean ± std across 5 seeds.")
@@ -399,6 +562,80 @@ def main():
             print(f"Acceptance rate: {results['acceptance_rate_mean']:.1f}% ± {results['acceptance_rate_std']:.1f}%")
             print()
             print(f"Based on {results['n_seeds']} random seeds × {results['n_splits']}-fold CV")
+
+        # Save run artifact if requested
+        if args.save_run:
+            import datetime
+            import subprocess
+
+            # Auto-generate run name if "auto" is specified
+            run_path = args.save_run
+            if str(run_path) == "auto":
+                # Generate: runs/YYYY-MM-DD_HHMMSS_<git_hash>
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                try:
+                    git_hash = subprocess.run(
+                        ['git', 'rev-parse', '--short', 'HEAD'],
+                        capture_output=True, text=True, timeout=5
+                    ).stdout.strip()
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    git_hash = "unknown"
+                run_path = Path(f"runs/{timestamp}_{git_hash}")
+
+            # Create config dict
+            run_config = {
+                'agreement_threshold': args.agreement,
+                'quality_threshold': args.quality,
+                'production_features': args.production,
+                'n_splits': results['n_splits'],
+                'seeds': results['seeds'],
+                'n_seeds': results['n_seeds'],
+            }
+
+            # Save metrics and config
+            run_path.mkdir(parents=True, exist_ok=True)
+
+            with open(run_path / 'config.json', 'w') as f:
+                json.dump(run_config, f, indent=2)
+
+            # Save aggregated metrics
+            metrics_data = {
+                'mae_mean': results['mae_mean'],
+                'mae_std': results['mae_std'],
+                'within_5_mean': results['within_5_mean'],
+                'within_5_std': results['within_5_std'],
+                'acceptance_rate_mean': results['acceptance_rate_mean'],
+                'acceptance_rate_std': results['acceptance_rate_std'],
+            }
+            with open(run_path / 'metrics.json', 'w') as f:
+                json.dump(metrics_data, f, indent=2)
+
+            # Save per-seed metrics
+            with open(run_path / 'seed_metrics.jsonl', 'w') as f:
+                for seed_metric in results['seed_metrics']:
+                    f.write(json.dumps(seed_metric) + '\n')
+
+            # Save environment info
+            import sys
+            env_info = {
+                'timestamp': datetime.datetime.now().isoformat(),
+                'python_version': sys.version.split()[0],
+                'quick_mode': args.quick,
+            }
+            try:
+                env_info['git_commit'] = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    capture_output=True, text=True, timeout=5
+                ).stdout.strip()
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                env_info['git_commit'] = "unknown"
+            with open(run_path / 'environment.json', 'w') as f:
+                json.dump(env_info, f, indent=2)
+
+            print()
+            print(f"Run saved to: {run_path}")
+            if args.quick:
+                print("WARNING: This is a quick-mode result. Don't report these numbers!")
 
     if args.train:
         if not args.output:
@@ -411,28 +648,41 @@ def main():
         )
         pipeline.fit(sim_ids, boom_frames, qualities, cache)
 
-        # Save models
-        args.output.mkdir(parents=True, exist_ok=True)
-        import torch
-        import joblib
-
-        torch.save(pipeline.cnn.state_dict(), args.output / 'cnn.pt')
-        joblib.dump(pipeline.hgb, args.output / 'hgb.joblib')
-        joblib.dump(pipeline.quality_model, args.output / 'quality.joblib')
-
-        # Save config
-        config_dict = {
-            'agreement_threshold': pipeline.agreement_threshold,
-            'quality_threshold': pipeline.quality_threshold,
-            'quality_window': pipeline.quality_window,
-            'n_features': pipeline.n_features,
-            'n_quality_features': pipeline.n_quality_features,
-            'quality_feature_indices': pipeline.quality_feature_indices,
-        }
-        with open(args.output / 'config.json', 'w') as f:
-            json.dump(config_dict, f, indent=2)
-
+        # Save models using the new save method
+        pipeline.save(args.output)
         print(f"Models saved to {args.output}")
+
+    if args.predict:
+        # Inference mode: load pretrained models and predict
+        print(f"\nLoading models from {args.predict}...")
+        pipeline = BoomDetectionPipeline.from_pretrained(args.predict)
+
+        print("Running predictions...")
+        predictions = pipeline.predict(sim_ids, cache)
+
+        # Output results
+        n_accepted = sum(1 for p in predictions if p.accepted)
+        print(f"\nPredictions: {n_accepted}/{len(predictions)} accepted")
+
+        # Write predictions to JSONL
+        output_file = args.predict / 'predictions.jsonl'
+        with open(output_file, 'w') as f:
+            for sid, pred in zip(sim_ids, predictions):
+                result = pred.to_dict()
+                result['sim_id'] = sid
+                result['true_boom'] = int(boom_frames[sim_ids.index(sid)])
+                result['true_quality'] = float(qualities[sim_ids.index(sid)])
+                f.write(json.dumps(result) + '\n')
+
+        print(f"Predictions written to {output_file}")
+
+        # Compute and print metrics
+        from .evaluation import compute_selective_metrics
+        metrics = compute_selective_metrics(predictions, boom_frames, qualities)
+        print("\nMetrics:")
+        print(f"  Selective MAE: {metrics['selective_mae']:.2f} frames")
+        print(f"  Coverage: {metrics['coverage']:.1%}")
+        print(f"  Within 5 frames: {metrics['selective_within_5']:.1%}")
 
 
 if __name__ == '__main__':

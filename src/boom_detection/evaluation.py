@@ -632,12 +632,149 @@ class MultiSeedResult:
 
 
 # =============================================================================
+# Multi-Seed Selective Result
+# =============================================================================
+
+@dataclass
+class MultiSeedSelectiveResult:
+    """
+    Results from multi-seed cross-validation for selective (abstaining) predictors.
+
+    Provides proper uncertainty estimates for selective metrics like coverage and
+    selective_mae separately.
+    """
+    k: int
+    seeds: list[int]
+    seed_metrics: list[dict[str, float]]
+
+    # Aggregated statistics (computed in __post_init__)
+    mean_metrics: dict[str, float] = field(default_factory=dict)
+    std_metrics: dict[str, float] = field(default_factory=dict)
+    ci_lower: dict[str, float] = field(default_factory=dict)
+    ci_upper: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if len(self.seed_metrics) > 0 and len(self.mean_metrics) == 0:
+            self._compute_statistics()
+
+    def _compute_statistics(self):
+        """Compute mean, std, and 95% CI across seeds."""
+        from scipy import stats
+
+        # Get all metric names from first result
+        metric_names = list(self.seed_metrics[0].keys())
+
+        for name in metric_names:
+            values = [m[name] for m in self.seed_metrics
+                     if not np.isnan(m.get(name, float('nan')))]
+            n = len(values)
+
+            if n > 0:
+                self.mean_metrics[name] = float(np.mean(values))
+                self.std_metrics[name] = float(np.std(values, ddof=1)) if n > 1 else 0.0
+
+                # 95% confidence interval (t-distribution for small n)
+                if n > 1 and self.std_metrics[name] > 0:
+                    se = self.std_metrics[name] / np.sqrt(n)
+                    t_val = stats.t.ppf(0.975, n - 1)
+                    self.ci_lower[name] = self.mean_metrics[name] - t_val * se
+                    self.ci_upper[name] = self.mean_metrics[name] + t_val * se
+                else:
+                    self.ci_lower[name] = self.mean_metrics[name]
+                    self.ci_upper[name] = self.mean_metrics[name]
+            else:
+                self.mean_metrics[name] = float('nan')
+                self.std_metrics[name] = 0.0
+                self.ci_lower[name] = float('nan')
+                self.ci_upper[name] = float('nan')
+
+    def summary(self) -> str:
+        """Generate summary with confidence intervals."""
+        lines = [
+            f"Selective Cross-Validation Results",
+            f"  {self.k}-fold CV × {len(self.seeds)} seeds",
+            f"  Seeds: {self.seeds}",
+            "=" * 60,
+            "",
+        ]
+
+        # Primary metrics
+        if 'selective_mae' in self.mean_metrics:
+            mae = self.mean_metrics['selective_mae']
+            mae_std = self.std_metrics.get('selective_mae', 0)
+            lines.append(f"Selective MAE: {mae:.2f} ± {mae_std:.2f}")
+            lines.append(f"  95% CI: [{self.ci_lower.get('selective_mae', mae):.2f}, "
+                        f"{self.ci_upper.get('selective_mae', mae):.2f}]")
+
+        if 'coverage' in self.mean_metrics:
+            cov = self.mean_metrics['coverage']
+            cov_std = self.std_metrics.get('coverage', 0)
+            lines.append(f"Coverage: {cov:.1%} ± {cov_std:.1%}")
+
+        lines.append("")
+        lines.append("All metrics (mean ± std):")
+
+        for name in sorted(self.mean_metrics.keys()):
+            mean = self.mean_metrics[name]
+            std = self.std_metrics.get(name, 0)
+
+            if np.isnan(mean):
+                lines.append(f"  {name}: N/A")
+            elif name.startswith('selective_within') or name.endswith('rate') or name == 'coverage':
+                lines.append(f"  {name}: {mean:.1%} ± {std:.1%}")
+            elif name in ('n_total', 'n_accepted'):
+                lines.append(f"  {name}: {mean:.0f}")
+            else:
+                lines.append(f"  {name}: {mean:.2f} ± {std:.2f}")
+
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            'k': self.k,
+            'seeds': self.seeds,
+            'mean_metrics': self.mean_metrics,
+            'std_metrics': self.std_metrics,
+            'ci_lower': self.ci_lower,
+            'ci_upper': self.ci_upper,
+            'seed_metrics': self.seed_metrics,
+        }
+
+
+# =============================================================================
 # Cache-Aware Evaluator (NEW)
 # =============================================================================
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .features import FeatureCache
+
+
+class CachedSelectivePredictor(Protocol):
+    """
+    Protocol for selective (abstaining) predictors that work with FeatureCache.
+
+    These predictors can reject simulations they're uncertain about.
+    """
+
+    def fit(
+        self,
+        sim_ids: list[str],
+        boom_frames: np.ndarray,
+        qualities: np.ndarray,
+        cache: 'FeatureCache'
+    ) -> None:
+        """Fit the model on training data (requires quality scores)."""
+        ...
+
+    def predict(
+        self,
+        sim_ids: list[str],
+        cache: 'FeatureCache'
+    ) -> list[SelectivePrediction]:
+        """Predict with abstention for simulations."""
+        ...
 
 
 class CachedPredictor(Protocol):
@@ -862,6 +999,154 @@ class CachedEvaluator:
         )
         return result.aggregate_metrics
 
+    # =========================================================================
+    # Selective (Abstaining) Predictor Support
+    # =========================================================================
+
+    def cross_validate_selective(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int = 5,
+        seeds: list[int] | None = None,
+        verbose: bool = True,
+    ) -> MultiSeedSelectiveResult:
+        """
+        Run robust multi-seed cross-validation for selective (abstaining) predictors.
+
+        IMPORTANT: predictor_fn must be a factory function that returns a NEW
+        predictor instance each time. This ensures each seed gets a fresh model.
+
+        Args:
+            predictor_fn: Factory function returning a selective predictor
+                         The predictor must implement:
+                         - fit(sim_ids, boom_frames, qualities, cache)
+                         - predict(sim_ids, cache) -> list[SelectivePrediction]
+            k: Number of folds (default: 5)
+            seeds: List of random seeds (default: [42, 43, 44, 45, 46])
+            verbose: Print progress
+
+        Returns:
+            MultiSeedSelectiveResult with uncertainty estimates
+
+        Example:
+            result = evaluator.cross_validate_selective(
+                lambda: BoomDetectionPipeline(agreement_threshold=5),
+                seeds=[42, 43, 44]
+            )
+            print(result.summary())
+        """
+        if seeds is None:
+            seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
+
+        all_seed_metrics = []
+
+        for seed_idx, seed in enumerate(seeds):
+            if verbose:
+                print(f"\n{'='*50}")
+                print(f"Seed {seed} ({seed_idx + 1}/{len(seeds)})")
+                print('='*50)
+
+            # Run single-seed CV
+            metrics = self._cross_validate_selective_single_seed(
+                predictor_fn, k=k, seed=seed, verbose=verbose
+            )
+            all_seed_metrics.append(metrics)
+
+        result = MultiSeedSelectiveResult(
+            k=k,
+            seeds=seeds,
+            seed_metrics=all_seed_metrics,
+        )
+
+        if verbose:
+            print(f"\n{'='*60}")
+            print("SUMMARY")
+            print('='*60)
+            mae = result.mean_metrics.get('selective_mae', float('nan'))
+            mae_std = result.std_metrics.get('selective_mae', 0)
+            cov = result.mean_metrics.get('coverage', 0)
+            cov_std = result.std_metrics.get('coverage', 0)
+            print(f"Selective MAE: {mae:.2f} ± {mae_std:.2f}")
+            print(f"Coverage: {cov:.1%} ± {cov_std:.1%}")
+
+        return result
+
+    def _cross_validate_selective_single_seed(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int,
+        seed: int,
+        verbose: bool,
+    ) -> dict[str, float]:
+        """Run selective CV with a single seed."""
+        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+        all_predictions: list[SelectivePrediction] = []
+        all_true_booms: list[int] = []
+        all_true_quals: list[float] = []
+
+        for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.sim_ids)):
+            # Derive fold-specific seed for model training
+            fold_seed = seed * 1000 + fold_idx
+
+            # Get train/test data
+            train_ids = [self.sim_ids[i] for i in train_idx]
+            test_ids = [self.sim_ids[i] for i in test_idx]
+            train_booms = self.boom_frames[train_idx]
+            train_quals = self.boom_qualities[train_idx]
+
+            # Create fresh predictor and train
+            predictor = predictor_fn()
+
+            # Pass fold seed if the predictor supports it
+            if hasattr(predictor, 'set_seed'):
+                predictor.set_seed(fold_seed)
+
+            predictor.fit(train_ids, train_booms, train_quals, self.cache)
+
+            # Predict - get list of SelectivePrediction
+            predictions = predictor.predict(test_ids, self.cache)
+
+            # Handle both SelectivePrediction and dict outputs
+            for pred in predictions:
+                if isinstance(pred, SelectivePrediction):
+                    all_predictions.append(pred)
+                else:
+                    all_predictions.append(SelectivePrediction.from_dict(pred))
+
+            all_true_booms.extend(self.boom_frames[test_idx].tolist())
+            all_true_quals.extend(self.boom_qualities[test_idx].tolist())
+
+            if verbose:
+                n_accepted = sum(1 for p in predictions
+                               if (isinstance(p, SelectivePrediction) and p.accepted)
+                               or (isinstance(p, dict) and p.get('accepted', False)))
+                print(f"  Fold {fold_idx + 1}/{k}: {n_accepted}/{len(predictions)} accepted")
+
+        # Compute metrics using unified framework
+        metrics = compute_selective_metrics(
+            all_predictions,
+            np.array(all_true_booms),
+            np.array(all_true_quals),
+        )
+
+        return metrics
+
+    def quick_evaluate_selective(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int = 5,
+        seed: int = 42,
+        verbose: bool = False,
+    ) -> dict[str, float]:
+        """
+        Quick single-seed evaluation for selective predictors.
+
+        Returns just the metrics dict for fast development iteration.
+        """
+        return self._cross_validate_selective_single_seed(
+            predictor_fn, k=k, seed=seed, verbose=verbose
+        )
+
 
 def robust_evaluate(
     cache: 'FeatureCache',
@@ -1008,6 +1293,117 @@ def compute_selective_metrics(
         if true_qualities is not None:
             rejected_quals = true_qualities[rejected_indices]
             metrics['rejected_high_quality_rate'] = float(np.mean(rejected_quals >= 0.5))
+
+    return metrics
+
+
+def compute_risk_coverage_curve(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    confidence_key: str = 'confidence',
+) -> dict[str, Any]:
+    """
+    Compute risk-coverage curve for selective predictions.
+
+    The risk-coverage curve shows how error (risk) changes as we accept more
+    predictions (coverage). Lower area under the curve (AURC) is better.
+
+    Args:
+        predictions: List of SelectivePrediction objects with confidence scores
+        true_booms: Ground truth boom frames
+        confidence_key: Which field to use as confidence ('confidence' or 'predicted_quality')
+
+    Returns:
+        Dictionary with:
+            - coverages: Array of coverage values [0, 1]
+            - risks: Array of risk (MAE) values at each coverage
+            - aurc: Area Under Risk-Coverage curve
+            - optimal_coverage: Coverage at minimum risk-coverage product
+    """
+    n = len(predictions)
+    if n == 0:
+        return {
+            'coverages': np.array([]),
+            'risks': np.array([]),
+            'aurc': float('nan'),
+            'optimal_coverage': 0.0,
+        }
+
+    # Get confidence scores and errors
+    confidences = []
+    errors = []
+    for i, pred in enumerate(predictions):
+        # Get confidence score
+        if confidence_key == 'confidence' and pred.confidence is not None:
+            conf = pred.confidence
+        else:
+            conf = pred.predicted_quality
+
+        # Compute error (use CNN prediction as it's more accurate)
+        error = abs(pred.cnn_pred - true_booms[i])
+
+        confidences.append(conf)
+        errors.append(error)
+
+    confidences = np.array(confidences)
+    errors = np.array(errors)
+
+    # Sort by confidence (highest first)
+    order = np.argsort(-confidences)
+    sorted_errors = errors[order]
+
+    # Compute cumulative risk at each coverage level
+    coverages = []
+    risks = []
+
+    for k in range(1, n + 1):
+        coverage = k / n
+        risk = np.mean(sorted_errors[:k])  # MAE of top-k most confident
+        coverages.append(coverage)
+        risks.append(risk)
+
+    coverages = np.array(coverages)
+    risks = np.array(risks)
+
+    # Compute AURC (Area Under Risk-Coverage curve) using trapezoidal rule
+    aurc = float(np.trapz(risks, coverages))
+
+    # Find optimal coverage (minimizes risk * (1 - coverage) or similar)
+    # A simple heuristic: find where risk starts increasing rapidly
+    risk_coverage_product = risks * (1 - coverages + 0.1)  # Add small constant to avoid zero
+    optimal_idx = np.argmin(risk_coverage_product)
+    optimal_coverage = float(coverages[optimal_idx])
+
+    return {
+        'coverages': coverages,
+        'risks': risks,
+        'aurc': aurc,
+        'optimal_coverage': optimal_coverage,
+        'risk_at_optimal': float(risks[optimal_idx]),
+    }
+
+
+def compute_selective_metrics_with_rc(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    true_qualities: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """
+    Compute selective metrics including risk-coverage analysis.
+
+    This combines compute_selective_metrics with compute_risk_coverage_curve.
+    """
+    # Get basic selective metrics
+    metrics = compute_selective_metrics(predictions, true_booms, true_qualities)
+
+    # Add risk-coverage analysis
+    rc = compute_risk_coverage_curve(predictions, true_booms)
+    metrics['aurc'] = rc['aurc']
+    metrics['optimal_coverage'] = rc['optimal_coverage']
+    metrics['risk_at_optimal'] = rc.get('risk_at_optimal', float('nan'))
+
+    # Store the full curve for plotting (not JSON-serializable)
+    metrics['_risk_coverage_curve'] = rc
 
     return metrics
 

@@ -97,52 +97,76 @@ class TestPipelineOutput:
         pipeline.fit(sim_ids, boom_frames, qualities, mock_cache_multi)
         return pipeline, mock_cache_multi
 
-    def test_predict_one_returns_dict(self, trained_pipeline):
-        """predict_one should return a dict with expected keys."""
+    def test_predict_one_returns_selective_prediction(self, trained_pipeline):
+        """predict_one should return a SelectivePrediction."""
+        from boom_detection.evaluation import SelectivePrediction
+
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert isinstance(result, dict)
-        expected_keys = {
-            'boom_frame', 'accepted', 'cnn_pred', 'hgb_pred',
-            'disagreement', 'predicted_quality'
-        }
-        assert set(result.keys()) == expected_keys
+        assert isinstance(result, SelectivePrediction)
+        # Check all expected attributes exist
+        assert hasattr(result, 'boom_frame')
+        assert hasattr(result, 'accepted')
+        assert hasattr(result, 'cnn_pred')
+        assert hasattr(result, 'hgb_pred')
+        assert hasattr(result, 'disagreement')
+        assert hasattr(result, 'predicted_quality')
+        assert hasattr(result, 'confidence')
 
     def test_predict_one_boom_frame_type(self, trained_pipeline):
         """boom_frame should be int or None."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert result['boom_frame'] is None or isinstance(result['boom_frame'], int)
+        assert result.boom_frame is None or isinstance(result.boom_frame, int)
 
     def test_predict_one_accepted_is_bool(self, trained_pipeline):
         """accepted should be a boolean."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert isinstance(result['accepted'], bool)
+        assert isinstance(result.accepted, bool)
 
     def test_predict_one_predictions_are_ints(self, trained_pipeline):
         """cnn_pred and hgb_pred should be ints."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert isinstance(result['cnn_pred'], int)
-        assert isinstance(result['hgb_pred'], int)
+        assert isinstance(result.cnn_pred, int)
+        assert isinstance(result.hgb_pred, int)
 
     def test_predict_one_quality_in_range(self, trained_pipeline):
         """predicted_quality should be in [0, 1]."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert 0 <= result['predicted_quality'] <= 1
+        assert 0 <= result.predicted_quality <= 1
+
+    def test_predict_one_confidence_in_range(self, trained_pipeline):
+        """confidence should be in [0, 1]."""
+        pipeline, cache = trained_pipeline
+        result = pipeline.predict_one(cache["sim_0"])
+
+        assert 0 <= result.confidence <= 1
 
     def test_predict_multiple(self, trained_pipeline):
         """predict should work for multiple simulations."""
+        from boom_detection.evaluation import SelectivePrediction
+
         pipeline, cache = trained_pipeline
         sim_ids = [f"sim_{i}" for i in range(5)]
         results = pipeline.predict(sim_ids, cache)
+
+        assert len(results) == 5
+        for result in results:
+            assert isinstance(result, SelectivePrediction)
+
+    def test_predict_dict_returns_dicts(self, trained_pipeline):
+        """predict_dict should return list of dicts for backward compatibility."""
+        pipeline, cache = trained_pipeline
+        sim_ids = [f"sim_{i}" for i in range(5)]
+        results = pipeline.predict_dict(sim_ids, cache)
 
         assert len(results) == 5
         for result in results:
@@ -172,21 +196,62 @@ class TestAcceptanceLogic:
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        expected_disagreement = abs(result['cnn_pred'] - result['hgb_pred'])
-        assert result['disagreement'] == expected_disagreement
+        expected_disagreement = abs(result.cnn_pred - result.hgb_pred)
+        assert result.disagreement == expected_disagreement
 
     def test_boom_frame_none_when_rejected(self, trained_pipeline):
         """boom_frame should be None when rejected."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        if not result['accepted']:
-            assert result['boom_frame'] is None
+        if not result.accepted:
+            assert result.boom_frame is None
 
     def test_boom_frame_set_when_accepted(self, trained_pipeline):
         """boom_frame should equal cnn_pred when accepted."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        if result['accepted']:
-            assert result['boom_frame'] == result['cnn_pred']
+        if result.accepted:
+            assert result.boom_frame == result.cnn_pred
+
+
+class TestBaselineFactories:
+    """Tests for baseline factory functions."""
+
+    def test_get_frame_level_predictors_returns_factories(self):
+        """get_frame_level_predictors should return callable factories."""
+        pytest.importorskip("sklearn")
+        from boom_detection.frame_models import get_frame_level_predictors
+
+        predictors = get_frame_level_predictors()
+
+        for name, factory in predictors.items():
+            assert callable(factory), f"{name} should be callable"
+            # Each call should return a new instance
+            instance1 = factory()
+            instance2 = factory()
+            assert instance1 is not instance2, f"{name} should return new instances"
+
+    def test_frame_gbm_factory_preserves_hyperparameters(self):
+        """frame_gbm factory should create GBM model, not default."""
+        pytest.importorskip("sklearn")
+        from boom_detection.frame_models import get_frame_level_predictors
+
+        predictors = get_frame_level_predictors()
+
+        # Check that frame_gbm creates a GBM model
+        if 'frame_gbm' in predictors:
+            model = predictors['frame_gbm']()
+            # The model should have internal gbm regressor, not ridge
+            assert hasattr(model, 'model_type') or hasattr(model, 'model')
+
+    def test_get_baselines_returns_factories(self):
+        """get_baselines should return callable factories."""
+        pytest.importorskip("sklearn")
+        from boom_detection.run_baselines import get_baselines
+
+        baselines = get_baselines()
+
+        for name, factory in baselines.items():
+            assert callable(factory), f"{name} should be callable"

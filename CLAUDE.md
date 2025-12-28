@@ -25,15 +25,24 @@ The boom is the moment of chaotic divergence: when nearly-identical pendulums su
 ```python
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
+# Train pipeline
 pipeline = BoomDetectionPipeline(
     agreement_threshold=5,
     quality_threshold=0.55,
+    calibrate_quality=True,  # Calibrate quality predictions
 )
 pipeline.fit(sim_ids, boom_frames, qualities, cache)
+
+# Predict - returns SelectivePrediction objects
 result = pipeline.predict_one(features)
 
-if result['accepted']:
-    boom_frame = result['boom_frame']  # Uses CNN prediction (more accurate than HGB)
+if result.accepted:
+    boom_frame = result.boom_frame  # Uses CNN prediction (more accurate than HGB)
+    confidence = result.confidence  # Combined confidence score
+
+# Save/load for deployment
+pipeline.save(Path("models/v1"))
+pipeline = BoomDetectionPipeline.from_pretrained(Path("models/v1"))
 ```
 
 ### Robust Evaluation (IMPORTANT!)
@@ -42,11 +51,21 @@ if result['accepted']:
 from boom_detection.evaluation import CachedEvaluator
 
 evaluator = CachedEvaluator(dataset, cache)
+
+# For non-selective models:
 result = evaluator.cross_validate(
     lambda: MyModel(),  # Factory function!
     seeds=[42, 43, 44, 45, 46],  # 5 seeds
 )
 print(f"MAE: {result.mean_metrics['mae']:.2f} ± {result.std_metrics['mae']:.2f}")
+
+# For selective (abstaining) models like BoomDetectionPipeline:
+result = evaluator.cross_validate_selective(
+    lambda: BoomDetectionPipeline(agreement_threshold=5),
+    seeds=[42, 43, 44, 45, 46],
+)
+print(f"Selective MAE: {result.mean_metrics['selective_mae']:.2f}")
+print(f"Coverage: {result.mean_metrics['coverage']:.1%}")
 ```
 
 ### Fast Iteration (Development)

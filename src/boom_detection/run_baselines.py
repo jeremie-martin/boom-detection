@@ -214,11 +214,9 @@ def get_baselines(include_frame_level: bool = True) -> dict[str, callable]:
     }
 
     if include_frame_level:
-        # Convert frame_level predictors to factories
+        # get_frame_level_predictors() now returns factories directly
         frame_predictors = get_frame_level_predictors()
-        for name, predictor_class in frame_predictors.items():
-            # frame_level predictors are already instances, wrap them
-            baselines[name] = lambda p=predictor_class: p.__class__() if hasattr(p, '__class__') else p
+        baselines.update(frame_predictors)
 
     return baselines
 

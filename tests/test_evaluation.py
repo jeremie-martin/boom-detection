@@ -8,37 +8,57 @@ import pytest
 
 
 class TestMetricCalculations:
-    """Tests for basic metric calculations."""
+    """Tests for basic metric calculations using actual evaluation functions."""
 
     def test_mae_calculation(self):
         """MAE should be computed correctly."""
+        from boom_detection.evaluation import mae
+
         predictions = np.array([10, 20, 30])
         true_values = np.array([12, 18, 35])
         # Errors: 2, 2, 5
         expected_mae = (2 + 2 + 5) / 3
 
-        actual_mae = np.mean(np.abs(predictions - true_values))
+        actual_mae = mae(predictions, true_values)
         assert actual_mae == expected_mae
 
     def test_mae_with_perfect_predictions(self):
         """MAE should be 0 for perfect predictions."""
+        from boom_detection.evaluation import mae
+
         predictions = np.array([10, 20, 30])
         true_values = np.array([10, 20, 30])
 
-        mae = np.mean(np.abs(predictions - true_values))
-        assert mae == 0.0
+        result = mae(predictions, true_values)
+        assert result == 0.0
 
     def test_within_n_frames(self):
         """Within-N-frames metric should be computed correctly."""
+        from boom_detection.evaluation import compute_all_metrics
+
         predictions = np.array([10, 20, 30, 40, 50])
         true_values = np.array([12, 18, 40, 42, 50])
         # Errors: 2, 2, 10, 2, 0
         # Within 5: 4/5 = 80%
 
-        errors = np.abs(predictions - true_values)
-        within_5 = np.mean(errors <= 5) * 100
+        metrics = compute_all_metrics(predictions, true_values)
+        within_5 = metrics['within_5'] * 100
 
         assert within_5 == 80.0
+
+    def test_compute_all_metrics(self):
+        """compute_all_metrics should return all expected keys."""
+        from boom_detection.evaluation import compute_all_metrics
+
+        predictions = np.array([10, 20, 30, 40, 50])
+        true_values = np.array([12, 18, 35, 42, 50])
+
+        metrics = compute_all_metrics(predictions, true_values)
+
+        expected_keys = {'mae', 'median_ae', 'rmse', 'max_ae', 'correlation',
+                         'within_5', 'within_10', 'within_15', 'within_30'}
+        assert set(metrics.keys()) == expected_keys
+        assert all(isinstance(v, float) for v in metrics.values())
 
 
 class TestCrossValidation:

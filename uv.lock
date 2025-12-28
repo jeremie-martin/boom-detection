@@ -14,10 +14,18 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "joblib" },
+    { name = "pytest" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "torch" },
+]
 dev = [
     { name = "pytest" },
 ]
 ml = [
+    { name = "joblib" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "torch" },
@@ -25,6 +33,8 @@ ml = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boom-detection", extras = ["dev", "ml"], marker = "extra == 'all'" },
+    { name = "joblib", marker = "extra == 'ml'", specifier = ">=1.3" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyqt6", specifier = ">=6.10.1" },
@@ -34,7 +44,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
-provides-extras = ["dev", "ml"]
+provides-extras = ["dev", "ml", "all"]
 
 [[package]]
 name = "colorama"

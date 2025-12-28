@@ -247,11 +247,22 @@ class FrameLevelClassifier:
         return np.array(predictions)
 
 
-def get_frame_level_predictors() -> dict[str, object]:
-    """Get all frame-level predictors for comparison."""
+def get_frame_level_predictors() -> dict[str, callable]:
+    """
+    Get all frame-level predictor factories for comparison.
+
+    Returns factory functions (not instances) so each evaluation seed gets a fresh model.
+    This ensures hyperparameters are preserved across evaluations.
+
+    Usage:
+        predictors = get_frame_level_predictors()
+        model = predictors['frame_gbm']()  # Creates new instance
+    """
     return {
-        'frame_ridge': FrameLevelRegressor(model='ridge'),
-        'frame_gbm': FrameLevelRegressor(model='gbm'),
-        'frame_logistic': FrameLevelClassifier(model='logistic'),
-        'frame_gbm_clf': FrameLevelClassifier(model='gbm'),
+        'frame_ridge': lambda: FrameLevelRegressor(model='ridge'),
+        'frame_gbm': lambda: FrameLevelRegressor(model='gbm'),
+        'frame_hist_gbm': lambda: FrameLevelRegressor(model='hist_gbm'),
+        'frame_logistic': lambda: FrameLevelClassifier(model='logistic'),
+        'frame_gbm_clf': lambda: FrameLevelClassifier(model='gbm'),
+        'frame_hist_gbm_clf': lambda: FrameLevelClassifier(model='hist_gbm'),
     }
