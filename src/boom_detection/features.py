@@ -863,7 +863,6 @@ class FeatureCache:
         self.cache_dir = cache_dir
         self.extractor = FeatureExtractor(config)
         self._cache: dict[str, np.ndarray] = {}
-        self._id_to_sim: dict[str, 'Simulation'] = {}
         self._name_to_idx: dict[str, int] | None = None  # Lazy-built index map
 
         # Create cache directory if specified
@@ -994,7 +993,6 @@ class FeatureCache:
 
             # Need to extract - requires the simulation data
             sim = dataset.simulations[sim_id]
-            self._id_to_sim[sim_id] = sim
             to_process.append((sim_id, sim))
 
         if loaded_from_disk > 0:
@@ -1058,7 +1056,6 @@ class FeatureCache:
                 features = self.extractor.transform(simulation)
                 self._cache[sim_id] = features
                 self._save_to_disk(sim_id, features)
-            self._id_to_sim[sim_id] = simulation
         return self._cache[sim_id]
 
     def load_from_disk(self, sim_ids: list[str] | None = None, verbose: bool = True) -> int:

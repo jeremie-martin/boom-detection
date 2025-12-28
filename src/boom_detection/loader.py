@@ -103,6 +103,20 @@ class Dataset:
     def __len__(self) -> int:
         return len(self.annotations)
 
+    def release_simulation_data(self) -> None:
+        """
+        Release raw simulation data to free memory (~35GB for 90 sims).
+
+        Call this after feature extraction when raw data is no longer needed.
+        The simulations dict will be cleared but annotations remain.
+
+        Warning: After calling this, you cannot extract new features or
+        access simulation data. Only use cached features via FeatureCache.
+        """
+        self.simulations.clear()
+        import gc
+        gc.collect()
+
     def __iter__(self) -> Iterator[tuple[Simulation, int, float]]:
         """Iterate over (simulation, boom_frame, boom_quality) tuples."""
         for ann in self.annotations:
