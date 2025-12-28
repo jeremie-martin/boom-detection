@@ -16,8 +16,8 @@ from .loader import (
     FIELD_NAMES,
 )
 
-# Evaluation types that don't require ML
-from .evaluation import (
+# Core metrics (pure numpy, no sklearn/scipy) - from metrics.py
+from .metrics import (
     SelectivePrediction,
     compute_selective_metrics,
     compute_selective_metrics_with_rc,
@@ -79,9 +79,8 @@ try:
         "PRODUCTION_CONFIG",
     ])
 
-    # Evaluation framework (requires sklearn)
+    # Evaluation framework (requires sklearn + scipy)
     from .evaluation import (
-        Evaluator,
         EvaluationResult,
         FoldResult,
         cross_validate,
@@ -93,7 +92,6 @@ try:
         robust_evaluate,
     )
     __all__.extend([
-        "Evaluator",
         "EvaluationResult",
         "FoldResult",
         "cross_validate",

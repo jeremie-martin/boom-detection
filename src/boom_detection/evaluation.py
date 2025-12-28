@@ -1,188 +1,73 @@
 """
 Evaluation framework for boom detection experiments.
 
-Provides k-fold cross-validation, multiple metrics, and utilities for
-systematic experimentation.
+Provides cross-validation with proper uncertainty estimates.
+This module requires sklearn and scipy.
+
+For core metrics without ML dependencies, see boom_detection.metrics.
 
 Usage:
-    from boom_detection.evaluation import Evaluator, cross_validate
+    from boom_detection.evaluation import CachedEvaluator
     from boom_detection import load_dataset
 
     dataset = load_dataset('data')
-    evaluator = Evaluator(dataset)
+    cache = FeatureCache(FeatureConfig(), cache_dir='.feature_cache')
+    cache.extract_all(dataset)
 
-    # Evaluate any predictor with sklearn-style fit/predict
-    results = evaluator.cross_validate(my_model, k=5)
-    print(results.summary())
-
-    # Or use a simple function
-    results = evaluator.cross_validate_fn(
-        lambda train, test: [mean(train_targets) for _ in test],
-        k=5
-    )
+    evaluator = CachedEvaluator(dataset, cache)
+    result = evaluator.cross_validate(lambda: MyModel())
+    print(result.summary())
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Protocol, TYPE_CHECKING
 
 import numpy as np
+from scipy import stats
 from sklearn.model_selection import KFold
 
-from .loader import Dataset, Simulation
+# Import core metrics and types (no sklearn dependency)
+from .metrics import (
+    SelectivePrediction,
+    compute_all_metrics,
+    compute_selective_metrics,
+    RunArtifact,
+    mae,
+    median_ae,
+    rmse,
+)
 
-
-# =============================================================================
-# Selective Prediction Types (for abstaining/rejection pipelines)
-# =============================================================================
-
-@dataclass
-class SelectivePrediction:
-    """
-    A single prediction that may be accepted or rejected.
-
-    This is the canonical format for selective (abstaining) predictors.
-    Use this to ensure consistent handling across the codebase.
-    """
-    boom_frame: int | None  # None if rejected
-    accepted: bool
-    cnn_pred: int
-    hgb_pred: int
-    disagreement: int
-    predicted_quality: float
-    confidence: float | None = None  # Optional confidence score
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'SelectivePrediction':
-        """Create from a dictionary (e.g., from pipeline output)."""
-        return cls(
-            boom_frame=d.get('boom_frame'),
-            accepted=d['accepted'],
-            cnn_pred=d['cnn_pred'],
-            hgb_pred=d['hgb_pred'],
-            disagreement=d['disagreement'],
-            predicted_quality=d['predicted_quality'],
-            confidence=d.get('confidence'),
-        )
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        d = {
-            'boom_frame': self.boom_frame,
-            'accepted': self.accepted,
-            'cnn_pred': self.cnn_pred,
-            'hgb_pred': self.hgb_pred,
-            'disagreement': self.disagreement,
-            'predicted_quality': self.predicted_quality,
-        }
-        if self.confidence is not None:
-            d['confidence'] = self.confidence
-        return d
-
-
-# =============================================================================
-# Metrics
-# =============================================================================
-
-def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean Absolute Error."""
-    return float(np.mean(np.abs(y_true - y_pred)))
-
-
-def median_ae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Median Absolute Error - robust to outliers."""
-    return float(np.median(np.abs(y_true - y_pred)))
-
-
-def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Root Mean Squared Error - penalizes large errors."""
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-
-
-def max_ae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Maximum Absolute Error - worst case."""
-    return float(np.max(np.abs(y_true - y_pred)))
-
-
-def within_n_frames(y_true: np.ndarray, y_pred: np.ndarray, n: int) -> float:
-    """Fraction of predictions within n frames of ground truth."""
-    return float(np.mean(np.abs(y_true - y_pred) <= n))
-
-
-def correlation(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Pearson correlation - does it rank correctly?"""
-    if np.std(y_pred) < 1e-9:  # constant predictions
-        return 0.0
-    return float(np.corrcoef(y_true, y_pred)[0, 1])
-
-
-def compute_all_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    task: str = "frame"
-) -> dict[str, float]:
-    """
-    Compute all relevant metrics for a prediction task.
-
-    Args:
-        y_true: Ground truth values
-        y_pred: Predicted values
-        task: "frame" for boom frame, "quality" for boom quality
-
-    Returns:
-        Dictionary of metric_name -> value
-    """
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-
-    metrics = {
-        'mae': mae(y_true, y_pred),
-        'median_ae': median_ae(y_true, y_pred),
-        'rmse': rmse(y_true, y_pred),
-        'max_ae': max_ae(y_true, y_pred),
-        'correlation': correlation(y_true, y_pred),
-    }
-
-    if task == "frame":
-        # Frame-specific: fraction within N frames
-        for n in [5, 10, 15, 30]:
-            metrics[f'within_{n}'] = within_n_frames(y_true, y_pred, n)
-    elif task == "quality":
-        # Quality-specific: within certain thresholds on 0-1 scale
-        for thresh in [0.05, 0.10, 0.15, 0.20]:
-            metrics[f'within_{thresh:.2f}'] = within_n_frames(y_true, y_pred, thresh)
-
-    return metrics
-
-
-# =============================================================================
-# Predictor Protocol
-# =============================================================================
-
-class Predictor(Protocol):
-    """Protocol for predictors with sklearn-style fit/predict interface."""
-
-    def fit(self, X: Sequence[Simulation], y: np.ndarray) -> None:
-        """Fit the predictor on training data."""
-        ...
-
-    def predict(self, X: Sequence[Simulation]) -> np.ndarray:
-        """Predict on new data."""
-        ...
-
-
-# Type for functional predictors
-PredictorFn = Callable[
-    [list[tuple[Simulation, int, float]], list[Simulation]],  # (train_data, test_sims)
-    np.ndarray  # predictions
+# Re-export for convenience
+__all__ = [
+    # From metrics (re-exported)
+    'SelectivePrediction',
+    'compute_all_metrics',
+    'compute_selective_metrics',
+    'RunArtifact',
+    'mae',
+    'median_ae',
+    'rmse',
+    # CV-specific
+    'FoldResult',
+    'EvaluationResult',
+    'MultiSeedResult',
+    'MultiSeedSelectiveResult',
+    'CachedPredictor',
+    'CachedSelectivePredictor',
+    'CachedEvaluator',
+    'robust_evaluate',
+    'cross_validate',
 ]
 
+if TYPE_CHECKING:
+    from .features import FeatureCache
+    from .loader import Dataset
+
 
 # =============================================================================
-# Results Container
+# Results Containers
 # =============================================================================
 
 @dataclass
@@ -265,39 +150,7 @@ class EvaluationResult:
             else:
                 lines.append(f"  {name}: {value:.3f}")
 
-        lines.extend([
-            "",
-            "Per-fold stability (mean ± std):",
-        ])
-
-        for name in sorted(self.metric_means.keys()):
-            mean = self.metric_means[name]
-            std = self.metric_stds[name]
-            if name.startswith('within'):
-                lines.append(f"  {name}: {mean:.1%} ± {std:.1%}")
-            else:
-                lines.append(f"  {name}: {mean:.3f} ± {std:.3f}")
-
         return "\n".join(lines)
-
-    def per_sample_errors(self) -> list[tuple[int, float, float, float]]:
-        """
-        Get per-sample errors for analysis.
-
-        Returns:
-            List of (index, ground_truth, prediction, error) tuples,
-            sorted by error descending.
-        """
-        errors = np.abs(self.all_ground_truth - self.all_predictions)
-        order = np.argsort(-errors)  # descending
-
-        return [
-            (int(self.all_indices[i]),
-             float(self.all_ground_truth[i]),
-             float(self.all_predictions[i]),
-             float(errors[i]))
-            for i in order
-        ]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -313,233 +166,9 @@ class EvaluationResult:
             'indices': self.all_indices.tolist(),
         }
 
-    def save(self, path: str | Path):
-        """Save results to JSON file."""
-        with open(path, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2)
-
 
 # =============================================================================
-# Evaluator Class
-# =============================================================================
-
-class Evaluator:
-    """
-    Main evaluation harness for boom detection experiments.
-
-    Usage:
-        evaluator = Evaluator(dataset)
-        results = evaluator.cross_validate(model, k=5)
-    """
-
-    def __init__(self, dataset: Dataset):
-        """
-        Initialize evaluator with a dataset.
-
-        Args:
-            dataset: Loaded Dataset object with simulations
-        """
-        self.dataset = dataset
-        self.annotations = dataset.annotations
-        self.n_samples = len(dataset)
-
-        # Extract targets
-        self.boom_frames = np.array([a.boom_frame for a in self.annotations])
-        self.boom_qualities = np.array([a.boom_quality for a in self.annotations])
-
-    def get_simulation(self, idx: int) -> Simulation:
-        """Get simulation by index."""
-        ann = self.annotations[idx]
-        return self.dataset.simulations[ann.id]
-
-    def cross_validate(
-        self,
-        predictor: Predictor,
-        k: int = 5,
-        seed: int = 42,
-        task: str = "frame",
-        verbose: bool = True,
-    ) -> EvaluationResult:
-        """
-        Run k-fold cross-validation with a sklearn-style predictor.
-
-        Args:
-            predictor: Object with fit(X, y) and predict(X) methods
-            k: Number of folds
-            seed: Random seed for reproducibility
-            task: "frame" for boom frame, "quality" for boom quality
-            verbose: Print progress
-
-        Returns:
-            EvaluationResult with all metrics and predictions
-        """
-        targets = self.boom_frames if task == "frame" else self.boom_qualities
-        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
-
-        fold_results = []
-
-        for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.annotations)):
-            if verbose:
-                print(f"Fold {fold_idx + 1}/{k}...")
-
-            # Get train/test simulations
-            train_sims = [self.get_simulation(i) for i in train_idx]
-            test_sims = [self.get_simulation(i) for i in test_idx]
-            train_y = targets[train_idx]
-            test_y = targets[test_idx]
-
-            # Fit and predict
-            predictor.fit(train_sims, train_y)
-            predictions = predictor.predict(test_sims)
-            predictions = np.asarray(predictions)
-
-            # Compute metrics
-            metrics = compute_all_metrics(test_y, predictions, task=task)
-
-            fold_results.append(FoldResult(
-                fold=fold_idx,
-                train_indices=train_idx,
-                test_indices=test_idx,
-                predictions=predictions,
-                ground_truth=test_y,
-                metrics=metrics,
-            ))
-
-            if verbose:
-                print(f"  MAE: {metrics['mae']:.2f}")
-
-        result = EvaluationResult(
-            task=task,
-            k=k,
-            seed=seed,
-            fold_results=fold_results,
-        )
-
-        if verbose:
-            print(f"\nAggregate MAE: {result.aggregate_metrics['mae']:.2f}")
-
-        return result
-
-    def cross_validate_fn(
-        self,
-        predict_fn: PredictorFn,
-        k: int = 5,
-        seed: int = 42,
-        task: str = "frame",
-        verbose: bool = True,
-    ) -> EvaluationResult:
-        """
-        Run k-fold cross-validation with a function-based predictor.
-
-        This is useful for simple methods that don't need a class.
-
-        Args:
-            predict_fn: Function(train_data, test_sims) -> predictions
-                where train_data is list of (Simulation, boom_frame, boom_quality)
-                and test_sims is list of Simulation
-            k: Number of folds
-            seed: Random seed
-            task: "frame" or "quality"
-            verbose: Print progress
-
-        Returns:
-            EvaluationResult
-        """
-        targets = self.boom_frames if task == "frame" else self.boom_qualities
-        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
-
-        fold_results = []
-
-        for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.annotations)):
-            if verbose:
-                print(f"Fold {fold_idx + 1}/{k}...")
-
-            # Build train data as (sim, frame, quality) tuples
-            train_data = [
-                (self.get_simulation(i),
-                 int(self.boom_frames[i]),
-                 float(self.boom_qualities[i]))
-                for i in train_idx
-            ]
-            test_sims = [self.get_simulation(i) for i in test_idx]
-            test_y = targets[test_idx]
-
-            # Get predictions
-            predictions = predict_fn(train_data, test_sims)
-            predictions = np.asarray(predictions)
-
-            # Compute metrics
-            metrics = compute_all_metrics(test_y, predictions, task=task)
-
-            fold_results.append(FoldResult(
-                fold=fold_idx,
-                train_indices=train_idx,
-                test_indices=test_idx,
-                predictions=predictions,
-                ground_truth=test_y,
-                metrics=metrics,
-            ))
-
-            if verbose:
-                print(f"  MAE: {metrics['mae']:.2f}")
-
-        result = EvaluationResult(
-            task=task,
-            k=k,
-            seed=seed,
-            fold_results=fold_results,
-        )
-
-        if verbose:
-            print(f"\nAggregate MAE: {result.aggregate_metrics['mae']:.2f}")
-
-        return result
-
-    def evaluate_single(
-        self,
-        predictions: np.ndarray,
-        task: str = "frame",
-    ) -> dict[str, float]:
-        """
-        Evaluate predictions directly (no cross-validation).
-
-        Useful when you have pre-computed predictions for all samples.
-
-        Args:
-            predictions: Array of predictions (same length as dataset)
-            task: "frame" or "quality"
-
-        Returns:
-            Dictionary of metrics
-        """
-        targets = self.boom_frames if task == "frame" else self.boom_qualities
-        return compute_all_metrics(targets, predictions, task=task)
-
-
-# =============================================================================
-# Convenience Functions
-# =============================================================================
-
-def cross_validate(
-    dataset: Dataset,
-    predictor: Predictor,
-    k: int = 5,
-    seed: int = 42,
-    task: str = "frame",
-    verbose: bool = True,
-) -> EvaluationResult:
-    """
-    Convenience function for cross-validation.
-
-    Equivalent to Evaluator(dataset).cross_validate(...)
-    """
-    return Evaluator(dataset).cross_validate(
-        predictor, k=k, seed=seed, task=task, verbose=verbose
-    )
-
-
-# =============================================================================
-# Robust Multi-Seed Evaluation (NEW)
+# Multi-Seed Results
 # =============================================================================
 
 @dataclass
@@ -547,7 +176,7 @@ class MultiSeedResult:
     """
     Results from multi-seed cross-validation.
 
-    Provides proper uncertainty estimates (mean ± std with confidence intervals).
+    Provides proper uncertainty estimates (mean +/- std with confidence intervals).
     This is the recommended result format for all experiments.
     """
     task: str
@@ -567,8 +196,6 @@ class MultiSeedResult:
 
     def _compute_statistics(self):
         """Compute mean, std, and 95% CI across seeds."""
-        from scipy import stats
-
         metric_names = list(self.seed_results[0].aggregate_metrics.keys())
 
         for name in metric_names:
@@ -591,8 +218,8 @@ class MultiSeedResult:
     def summary(self, primary_metric: str = 'mae') -> str:
         """Generate summary with confidence intervals."""
         lines = [
-            f"Robust Cross-Validation Results",
-            f"  {self.k}-fold CV × {len(self.seeds)} seeds = {self.k * len(self.seeds)} evaluations",
+            "Robust Cross-Validation Results",
+            f"  {self.k}-fold CV x {len(self.seeds)} seeds = {self.k * len(self.seeds)} evaluations",
             f"  Seeds: {self.seeds}",
             "=" * 60,
             "",
@@ -601,20 +228,20 @@ class MultiSeedResult:
         # Primary metric with full details
         pm = primary_metric
         lines.append(f"Primary metric ({pm}):")
-        lines.append(f"  {self.mean_metrics[pm]:.2f} ± {self.std_metrics[pm]:.2f}")
+        lines.append(f"  {self.mean_metrics[pm]:.2f} +/- {self.std_metrics[pm]:.2f}")
         lines.append(f"  95% CI: [{self.ci_lower[pm]:.2f}, {self.ci_upper[pm]:.2f}]")
         lines.append("")
 
         # All metrics
-        lines.append("All metrics (mean ± std):")
+        lines.append("All metrics (mean +/- std):")
         for name in sorted(self.mean_metrics.keys()):
             mean = self.mean_metrics[name]
             std = self.std_metrics[name]
 
             if name.startswith('within'):
-                lines.append(f"  {name}: {mean:.1%} ± {std:.1%}")
+                lines.append(f"  {name}: {mean:.1%} +/- {std:.1%}")
             else:
-                lines.append(f"  {name}: {mean:.2f} ± {std:.2f}")
+                lines.append(f"  {name}: {mean:.2f} +/- {std:.2f}")
 
         return "\n".join(lines)
 
@@ -630,10 +257,6 @@ class MultiSeedResult:
             'ci_upper': self.ci_upper,
         }
 
-
-# =============================================================================
-# Multi-Seed Selective Result
-# =============================================================================
 
 @dataclass
 class MultiSeedSelectiveResult:
@@ -659,8 +282,6 @@ class MultiSeedSelectiveResult:
 
     def _compute_statistics(self):
         """Compute mean, std, and 95% CI across seeds."""
-        from scipy import stats
-
         # Get all metric names from first result
         metric_names = list(self.seed_metrics[0].keys())
 
@@ -691,8 +312,8 @@ class MultiSeedSelectiveResult:
     def summary(self) -> str:
         """Generate summary with confidence intervals."""
         lines = [
-            f"Selective Cross-Validation Results",
-            f"  {self.k}-fold CV × {len(self.seeds)} seeds",
+            "Selective Cross-Validation Results",
+            f"  {self.k}-fold CV x {len(self.seeds)} seeds",
             f"  Seeds: {self.seeds}",
             "=" * 60,
             "",
@@ -700,19 +321,19 @@ class MultiSeedSelectiveResult:
 
         # Primary metrics
         if 'selective_mae' in self.mean_metrics:
-            mae = self.mean_metrics['selective_mae']
+            mae_val = self.mean_metrics['selective_mae']
             mae_std = self.std_metrics.get('selective_mae', 0)
-            lines.append(f"Selective MAE: {mae:.2f} ± {mae_std:.2f}")
-            lines.append(f"  95% CI: [{self.ci_lower.get('selective_mae', mae):.2f}, "
-                        f"{self.ci_upper.get('selective_mae', mae):.2f}]")
+            lines.append(f"Selective MAE: {mae_val:.2f} +/- {mae_std:.2f}")
+            lines.append(f"  95% CI: [{self.ci_lower.get('selective_mae', mae_val):.2f}, "
+                        f"{self.ci_upper.get('selective_mae', mae_val):.2f}]")
 
         if 'coverage' in self.mean_metrics:
             cov = self.mean_metrics['coverage']
             cov_std = self.std_metrics.get('coverage', 0)
-            lines.append(f"Coverage: {cov:.1%} ± {cov_std:.1%}")
+            lines.append(f"Coverage: {cov:.1%} +/- {cov_std:.1%}")
 
         lines.append("")
-        lines.append("All metrics (mean ± std):")
+        lines.append("All metrics (mean +/- std):")
 
         for name in sorted(self.mean_metrics.keys()):
             mean = self.mean_metrics[name]
@@ -720,12 +341,12 @@ class MultiSeedSelectiveResult:
 
             if np.isnan(mean):
                 lines.append(f"  {name}: N/A")
-            elif name.startswith('selective_within') or name.endswith('rate') or name == 'coverage':
-                lines.append(f"  {name}: {mean:.1%} ± {std:.1%}")
+            elif name.startswith('selective_within') or name == 'coverage':
+                lines.append(f"  {name}: {mean:.1%} +/- {std:.1%}")
             elif name in ('n_total', 'n_accepted'):
                 lines.append(f"  {name}: {mean:.0f}")
             else:
-                lines.append(f"  {name}: {mean:.2f} ± {std:.2f}")
+                lines.append(f"  {name}: {mean:.2f} +/- {std:.2f}")
 
         return "\n".join(lines)
 
@@ -743,12 +364,35 @@ class MultiSeedSelectiveResult:
 
 
 # =============================================================================
-# Cache-Aware Evaluator (NEW)
+# Predictor Protocols
 # =============================================================================
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .features import FeatureCache
+class CachedPredictor(Protocol):
+    """
+    Protocol for predictors that work with FeatureCache.
+
+    This is the interface used by all models in this codebase:
+    - FrameLevelClassifier, FrameLevelRegressor
+    - SequenceTrainer (CNN, LSTM, Transformer)
+    - All models in run_baselines.py
+    """
+
+    def fit(
+        self,
+        sim_ids: list[str],
+        targets: np.ndarray,
+        cache: 'FeatureCache'
+    ) -> None:
+        """Fit the model on training data."""
+        ...
+
+    def predict(
+        self,
+        sim_ids: list[str],
+        cache: 'FeatureCache'
+    ) -> np.ndarray:
+        """Predict on new simulations."""
+        ...
 
 
 class CachedSelectivePredictor(Protocol):
@@ -777,43 +421,16 @@ class CachedSelectivePredictor(Protocol):
         ...
 
 
-class CachedPredictor(Protocol):
-    """
-    Protocol for predictors that work with FeatureCache.
-
-    This is the ACTUAL interface used by all models in this codebase:
-    - FrameLevelClassifier, FrameLevelRegressor
-    - SequenceTrainer (CNN, LSTM, Transformer)
-    - BoomDetectionPipeline
-    - All models in run_baselines.py
-    """
-
-    def fit(
-        self,
-        sim_ids: list[str],
-        targets: np.ndarray,
-        cache: 'FeatureCache'
-    ) -> None:
-        """Fit the model on training data."""
-        ...
-
-    def predict(
-        self,
-        sim_ids: list[str],
-        cache: 'FeatureCache'
-    ) -> np.ndarray:
-        """Predict on new simulations."""
-        ...
-
+# =============================================================================
+# CachedEvaluator - The One Blessed Evaluator
+# =============================================================================
 
 class CachedEvaluator:
     """
-    Evaluator that works with FeatureCache and the actual model interface.
+    The primary evaluator for all experiments.
 
-    This is the recommended evaluator for all experiments. It:
-    - Uses the (sim_ids, targets, cache) interface that all models implement
-    - Runs multiple seeds by default for robust estimates
-    - Returns proper uncertainty bounds
+    Uses the (sim_ids, targets, cache) interface that all models implement.
+    Runs multiple seeds by default for robust estimates.
 
     Usage:
         from boom_detection.features import FeatureCache, FeatureConfig
@@ -825,14 +442,14 @@ class CachedEvaluator:
         evaluator = CachedEvaluator(dataset, cache)
 
         # Quick single-seed evaluation (for development)
-        result = evaluator.cross_validate(my_model, seeds=[42])
+        result = evaluator.cross_validate(lambda: MyModel(), seeds=[42])
 
         # Robust multi-seed evaluation (for reporting)
-        result = evaluator.cross_validate(my_model)  # Uses 5 seeds by default
+        result = evaluator.cross_validate(lambda: MyModel())  # Uses 5 seeds
         print(result.summary())
     """
 
-    def __init__(self, dataset: Dataset, cache: 'FeatureCache'):
+    def __init__(self, dataset: 'Dataset', cache: 'FeatureCache'):
         """
         Args:
             dataset: Dataset with annotations
@@ -871,19 +488,6 @@ class CachedEvaluator:
 
         Returns:
             MultiSeedResult with uncertainty estimates
-
-        Example:
-            # For a class-based model:
-            result = evaluator.cross_validate(
-                lambda: FrameLevelClassifier(max_depth=7),
-                seeds=[42, 43, 44]
-            )
-
-            # For quick development (single seed):
-            result = evaluator.cross_validate(
-                lambda: MyModel(),
-                seeds=[42]
-            )
         """
         if seeds is None:
             seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
@@ -914,7 +518,7 @@ class CachedEvaluator:
             print(f"\n{'='*60}")
             print("SUMMARY")
             print('='*60)
-            print(f"MAE: {multi_result.mean_metrics['mae']:.2f} ± {multi_result.std_metrics['mae']:.2f}")
+            print(f"MAE: {multi_result.mean_metrics['mae']:.2f} +/- {multi_result.std_metrics['mae']:.2f}")
             print(f"95% CI: [{multi_result.ci_lower['mae']:.2f}, {multi_result.ci_upper['mae']:.2f}]")
 
         return multi_result
@@ -933,6 +537,9 @@ class CachedEvaluator:
         fold_results = []
 
         for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.sim_ids)):
+            # Derive fold-specific seed for model training
+            fold_seed = seed * 1000 + fold_idx
+
             # Get train/test data
             train_ids = [self.sim_ids[i] for i in train_idx]
             test_ids = [self.sim_ids[i] for i in test_idx]
@@ -941,6 +548,11 @@ class CachedEvaluator:
 
             # Create fresh predictor and train
             predictor = predictor_fn()
+
+            # Pass fold seed if the predictor supports it
+            if hasattr(predictor, 'set_seed'):
+                predictor.set_seed(fold_seed)
+
             predictor.fit(train_ids, train_y, self.cache)
 
             # Predict
@@ -1027,13 +639,6 @@ class CachedEvaluator:
 
         Returns:
             MultiSeedSelectiveResult with uncertainty estimates
-
-        Example:
-            result = evaluator.cross_validate_selective(
-                lambda: BoomDetectionPipeline(agreement_threshold=5),
-                seeds=[42, 43, 44]
-            )
-            print(result.summary())
         """
         if seeds is None:
             seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
@@ -1062,12 +667,12 @@ class CachedEvaluator:
             print(f"\n{'='*60}")
             print("SUMMARY")
             print('='*60)
-            mae = result.mean_metrics.get('selective_mae', float('nan'))
+            mae_val = result.mean_metrics.get('selective_mae', float('nan'))
             mae_std = result.std_metrics.get('selective_mae', 0)
             cov = result.mean_metrics.get('coverage', 0)
             cov_std = result.std_metrics.get('coverage', 0)
-            print(f"Selective MAE: {mae:.2f} ± {mae_std:.2f}")
-            print(f"Coverage: {cov:.1%} ± {cov_std:.1%}")
+            print(f"Selective MAE: {mae_val:.2f} +/- {mae_std:.2f}")
+            print(f"Coverage: {cov:.1%} +/- {cov_std:.1%}")
 
         return result
 
@@ -1148,6 +753,29 @@ class CachedEvaluator:
         )
 
 
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+def cross_validate(
+    dataset: 'Dataset',
+    cache: 'FeatureCache',
+    predictor_fn: Callable[[], CachedPredictor],
+    k: int = 5,
+    seeds: list[int] | None = None,
+    task: str = "frame",
+    verbose: bool = True,
+) -> MultiSeedResult:
+    """
+    Convenience function for cross-validation.
+
+    Equivalent to CachedEvaluator(dataset, cache).cross_validate(...)
+    """
+    return CachedEvaluator(dataset, cache).cross_validate(
+        predictor_fn, k=k, seeds=seeds, task=task, verbose=verbose
+    )
+
+
 def robust_evaluate(
     cache: 'FeatureCache',
     predictor_fn: Callable[[], CachedPredictor],
@@ -1175,21 +803,7 @@ def robust_evaluate(
         verbose: Print progress
 
     Returns:
-        MultiSeedResult with mean ± std ± CI
-
-    Example:
-        from boom_detection.features import FeatureCache, FeatureConfig
-        from boom_detection.evaluation import robust_evaluate
-        from boom_detection.frame_models import FrameLevelClassifier
-
-        cache = FeatureCache(FeatureConfig(), cache_dir='.feature_cache')
-        cache.load_from_disk()  # Load pre-extracted features
-
-        result = robust_evaluate(
-            cache,
-            lambda: FrameLevelClassifier(max_depth=7),
-        )
-        print(result.summary())
+        MultiSeedResult with mean +/- std +/- CI
     """
     from .loader import load_annotations
     import os
@@ -1223,382 +837,3 @@ def robust_evaluate(
     return evaluator.cross_validate(
         predictor_fn, k=k, seeds=seeds, task=task, verbose=verbose
     )
-
-
-# =============================================================================
-# Selective (Abstaining) Metrics
-# =============================================================================
-
-def compute_selective_metrics(
-    predictions: list[SelectivePrediction],
-    true_booms: np.ndarray,
-    true_qualities: np.ndarray | None = None,
-) -> dict[str, float]:
-    """
-    Compute metrics for selective (abstaining) predictions.
-
-    These metrics separate coverage (acceptance rate) from accuracy.
-
-    Args:
-        predictions: List of SelectivePrediction objects
-        true_booms: Ground truth boom frames
-        true_qualities: Optional ground truth qualities
-
-    Returns:
-        Dictionary with selective metrics
-    """
-    n_total = len(predictions)
-    accepted_indices = [i for i, p in enumerate(predictions) if p.accepted]
-    n_accepted = len(accepted_indices)
-
-    metrics = {
-        'n_total': n_total,
-        'n_accepted': n_accepted,
-        'coverage': n_accepted / n_total if n_total > 0 else 0.0,
-        'rejection_rate': 1 - (n_accepted / n_total) if n_total > 0 else 1.0,
-    }
-
-    if n_accepted > 0:
-        # Compute errors only for accepted predictions
-        accepted_preds = [predictions[i] for i in accepted_indices]
-        accepted_booms = true_booms[accepted_indices]
-
-        errors = np.array([
-            abs(p.boom_frame - t) for p, t in zip(accepted_preds, accepted_booms)
-        ])
-
-        metrics['selective_mae'] = float(np.mean(errors))
-        metrics['selective_median_ae'] = float(np.median(errors))
-        metrics['selective_max_ae'] = float(np.max(errors))
-        metrics['selective_within_5'] = float(np.mean(errors <= 5))
-        metrics['selective_within_10'] = float(np.mean(errors <= 10))
-
-        # Quality of accepted simulations (if available)
-        if true_qualities is not None:
-            accepted_quals = true_qualities[accepted_indices]
-            metrics['mean_accepted_quality'] = float(np.mean(accepted_quals))
-            metrics['quality_precision'] = float(np.mean(accepted_quals >= 0.5))
-    else:
-        # No accepted predictions
-        metrics['selective_mae'] = float('nan')
-        metrics['selective_median_ae'] = float('nan')
-        metrics['selective_max_ae'] = float('nan')
-        metrics['selective_within_5'] = float('nan')
-        metrics['selective_within_10'] = float('nan')
-
-    # Rejection analysis
-    rejected_indices = [i for i, p in enumerate(predictions) if not p.accepted]
-    if rejected_indices:
-        # How many rejected were high quality?
-        if true_qualities is not None:
-            rejected_quals = true_qualities[rejected_indices]
-            metrics['rejected_high_quality_rate'] = float(np.mean(rejected_quals >= 0.5))
-
-    return metrics
-
-
-def compute_risk_coverage_curve(
-    predictions: list[SelectivePrediction],
-    true_booms: np.ndarray,
-    confidence_key: str = 'confidence',
-) -> dict[str, Any]:
-    """
-    Compute risk-coverage curve for selective predictions.
-
-    The risk-coverage curve shows how error (risk) changes as we accept more
-    predictions (coverage). Lower area under the curve (AURC) is better.
-
-    Args:
-        predictions: List of SelectivePrediction objects with confidence scores
-        true_booms: Ground truth boom frames
-        confidence_key: Which field to use as confidence ('confidence' or 'predicted_quality')
-
-    Returns:
-        Dictionary with:
-            - coverages: Array of coverage values [0, 1]
-            - risks: Array of risk (MAE) values at each coverage
-            - aurc: Area Under Risk-Coverage curve
-            - optimal_coverage: Coverage at minimum risk-coverage product
-    """
-    n = len(predictions)
-    if n == 0:
-        return {
-            'coverages': np.array([]),
-            'risks': np.array([]),
-            'aurc': float('nan'),
-            'optimal_coverage': 0.0,
-        }
-
-    # Get confidence scores and errors
-    confidences = []
-    errors = []
-    for i, pred in enumerate(predictions):
-        # Get confidence score
-        if confidence_key == 'confidence' and pred.confidence is not None:
-            conf = pred.confidence
-        else:
-            conf = pred.predicted_quality
-
-        # Compute error (use CNN prediction as it's more accurate)
-        error = abs(pred.cnn_pred - true_booms[i])
-
-        confidences.append(conf)
-        errors.append(error)
-
-    confidences = np.array(confidences)
-    errors = np.array(errors)
-
-    # Sort by confidence (highest first)
-    order = np.argsort(-confidences)
-    sorted_errors = errors[order]
-
-    # Compute cumulative risk at each coverage level
-    coverages = []
-    risks = []
-
-    for k in range(1, n + 1):
-        coverage = k / n
-        risk = np.mean(sorted_errors[:k])  # MAE of top-k most confident
-        coverages.append(coverage)
-        risks.append(risk)
-
-    coverages = np.array(coverages)
-    risks = np.array(risks)
-
-    # Compute AURC (Area Under Risk-Coverage curve) using trapezoidal rule
-    aurc = float(np.trapz(risks, coverages))
-
-    # Find optimal coverage (minimizes risk * (1 - coverage) or similar)
-    # A simple heuristic: find where risk starts increasing rapidly
-    risk_coverage_product = risks * (1 - coverages + 0.1)  # Add small constant to avoid zero
-    optimal_idx = np.argmin(risk_coverage_product)
-    optimal_coverage = float(coverages[optimal_idx])
-
-    return {
-        'coverages': coverages,
-        'risks': risks,
-        'aurc': aurc,
-        'optimal_coverage': optimal_coverage,
-        'risk_at_optimal': float(risks[optimal_idx]),
-    }
-
-
-def compute_selective_metrics_with_rc(
-    predictions: list[SelectivePrediction],
-    true_booms: np.ndarray,
-    true_qualities: np.ndarray | None = None,
-) -> dict[str, Any]:
-    """
-    Compute selective metrics including risk-coverage analysis.
-
-    This combines compute_selective_metrics with compute_risk_coverage_curve.
-    """
-    # Get basic selective metrics
-    metrics = compute_selective_metrics(predictions, true_booms, true_qualities)
-
-    # Add risk-coverage analysis
-    rc = compute_risk_coverage_curve(predictions, true_booms)
-    metrics['aurc'] = rc['aurc']
-    metrics['optimal_coverage'] = rc['optimal_coverage']
-    metrics['risk_at_optimal'] = rc.get('risk_at_optimal', float('nan'))
-
-    # Store the full curve for plotting (not JSON-serializable)
-    metrics['_risk_coverage_curve'] = rc
-
-    return metrics
-
-
-# =============================================================================
-# Run Artifacts (for reproducibility and results tracking)
-# =============================================================================
-
-@dataclass
-class RunArtifact:
-    """
-    Captures a complete evaluation run for reproducibility.
-
-    Stores config, metrics, per-simulation predictions, and environment info.
-    Can be saved to disk and loaded later for analysis.
-
-    Usage:
-        artifact = RunArtifact.create(
-            config={...},
-            predictions=[...],
-            true_booms=[...],
-            true_qualities=[...],
-        )
-        artifact.save(Path('runs/2025-01-01_exp1'))
-
-        # Later
-        artifact = RunArtifact.load(Path('runs/2025-01-01_exp1'))
-    """
-    config: dict
-    metrics: dict
-    predictions: list[dict]  # Per-simulation predictions
-    environment: dict
-    timestamp: str = ""
-
-    @classmethod
-    def create(
-        cls,
-        config: dict,
-        predictions: list[SelectivePrediction] | list[dict],
-        true_booms: np.ndarray,
-        true_qualities: np.ndarray | None = None,
-        sim_ids: list[str] | None = None,
-    ) -> 'RunArtifact':
-        """
-        Create a run artifact from predictions.
-
-        Args:
-            config: Pipeline/model configuration
-            predictions: List of SelectivePrediction or dicts
-            true_booms: Ground truth boom frames
-            true_qualities: Ground truth qualities
-            sim_ids: Simulation IDs (optional)
-
-        Returns:
-            RunArtifact ready for saving
-        """
-        import datetime
-        import sys
-        import subprocess
-
-        # Convert predictions to dicts if needed
-        if predictions and isinstance(predictions[0], SelectivePrediction):
-            pred_dicts = [p.to_dict() for p in predictions]
-            selective_preds = predictions
-        else:
-            pred_dicts = predictions
-            selective_preds = [SelectivePrediction.from_dict(p) for p in predictions]
-
-        # Add ground truth to predictions
-        for i, pd in enumerate(pred_dicts):
-            pd['true_boom'] = int(true_booms[i])
-            if true_qualities is not None:
-                pd['true_quality'] = float(true_qualities[i])
-            if sim_ids is not None:
-                pd['sim_id'] = sim_ids[i]
-
-        # Compute metrics
-        metrics = compute_selective_metrics(
-            selective_preds, true_booms, true_qualities
-        )
-
-        # Capture environment
-        try:
-            git_commit = subprocess.run(
-                ['git', 'rev-parse', 'HEAD'],
-                capture_output=True, text=True, timeout=5
-            ).stdout.strip()[:8]
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            git_commit = "unknown"
-
-        environment = {
-            'python_version': sys.version.split()[0],
-            'git_commit': git_commit,
-        }
-
-        timestamp = datetime.datetime.now().isoformat()
-
-        return cls(
-            config=config,
-            metrics=metrics,
-            predictions=pred_dicts,
-            environment=environment,
-            timestamp=timestamp,
-        )
-
-    def save(self, path: Path) -> None:
-        """
-        Save artifact to directory.
-
-        Creates:
-            path/config.json
-            path/metrics.json
-            path/predictions.jsonl
-            path/environment.json
-        """
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-
-        with open(path / 'config.json', 'w') as f:
-            json.dump(self.config, f, indent=2)
-
-        with open(path / 'metrics.json', 'w') as f:
-            json.dump(self.metrics, f, indent=2)
-
-        with open(path / 'predictions.jsonl', 'w') as f:
-            for pred in self.predictions:
-                f.write(json.dumps(pred) + '\n')
-
-        env_with_meta = {
-            **self.environment,
-            'timestamp': self.timestamp,
-        }
-        with open(path / 'environment.json', 'w') as f:
-            json.dump(env_with_meta, f, indent=2)
-
-    @classmethod
-    def load(cls, path: Path) -> 'RunArtifact':
-        """Load artifact from directory."""
-        path = Path(path)
-
-        with open(path / 'config.json') as f:
-            config = json.load(f)
-
-        with open(path / 'metrics.json') as f:
-            metrics = json.load(f)
-
-        predictions = []
-        with open(path / 'predictions.jsonl') as f:
-            for line in f:
-                predictions.append(json.loads(line))
-
-        with open(path / 'environment.json') as f:
-            env_data = json.load(f)
-            timestamp = env_data.pop('timestamp', '')
-            environment = env_data
-
-        return cls(
-            config=config,
-            metrics=metrics,
-            predictions=predictions,
-            environment=environment,
-            timestamp=timestamp,
-        )
-
-    def summary(self) -> str:
-        """Generate a human-readable summary."""
-        lines = [
-            f"Run Artifact ({self.timestamp})",
-            "=" * 60,
-            "",
-            "Metrics:",
-        ]
-
-        for name, value in sorted(self.metrics.items()):
-            if isinstance(value, float):
-                if name.startswith('selective_within') or name.endswith('rate'):
-                    lines.append(f"  {name}: {value:.1%}")
-                elif not np.isnan(value):
-                    lines.append(f"  {name}: {value:.2f}")
-                else:
-                    lines.append(f"  {name}: N/A")
-            else:
-                lines.append(f"  {name}: {value}")
-
-        lines.extend([
-            "",
-            "Config:",
-        ])
-        for key, value in sorted(self.config.items()):
-            lines.append(f"  {key}: {value}")
-
-        lines.extend([
-            "",
-            f"Environment: Python {self.environment.get('python_version', '?')}, "
-            f"git {self.environment.get('git_commit', '?')}",
-        ])
-
-        return "\n".join(lines)

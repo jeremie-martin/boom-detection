@@ -42,7 +42,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegress
 
 from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
-from .evaluation import SelectivePrediction
+from .metrics import SelectivePrediction
 from .sequence_models import CNNClassifier, SequenceTrainer
 
 
@@ -675,7 +675,7 @@ def main():
         print(f"Predictions written to {output_file}")
 
         # Compute and print metrics
-        from .evaluation import compute_selective_metrics
+        from .metrics import compute_selective_metrics
         metrics = compute_selective_metrics(predictions, boom_frames, qualities)
         print("\nMetrics:")
         print(f"  Selective MAE: {metrics['selective_mae']:.2f} frames")
