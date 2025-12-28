@@ -234,11 +234,42 @@ Tested pipeline: Quality filter → Frame detector (trained on high-quality)
 7. Feature 657 (importance: 0.0009)
 8. Feature 70 (importance: 0.0006)
 
+## Phase 8: Hyperparameter Optimization
+
+### Best Configurations Found
+
+**CNN (Optimized)**
+- Learning rate: 0.5e-3 (half default)
+- Hidden dim: 32 (smaller)
+- Epochs: 30, Patience: 5
+- **MAE: 14.5, MedAE: 9.0, Within 10: 55%**
+
+**HistGBM (Optimized)**
+- n_estimators: 200
+- max_depth: 7
+- Features: Top 50
+- **MAE: 16.2, MedAE: 5.0, Within 10: 59%**
+
+### Agreement Analysis (Optimized Models)
+
+| Condition | n | CNN MAE | HistGBM MAE | Average MAE |
+|-----------|---|---------|-------------|-------------|
+| Agree (≤10 frames) | 33 | 8.5 | 7.5 | **7.7** |
+| Disagree (>10 frames) | 16 | 26.9 | 34.0 | - |
+
+**Key finding**: When optimized models agree, MAE is 7.5-7.7 - approaching goal!
+
+### By Quality
+
+| Quality | CNN MAE | HistGBM MAE |
+|---------|---------|-------------|
+| High (≥0.5) | 8.8 | 10.8 |
+| Low (<0.5) | 23.4 | 24.6 |
+
 ## Next Steps
 
-1. **Confidence-weighted ensemble**: Learn optimal weights based on agreement
-2. **Three-model ensemble**: Add third model for median voting (more robust)
-3. **Local refinement**: Coarse prediction → fine-tune in ±20 frame window
-4. **Quality-stratified models**: Train separate models for high/low quality
-5. **Hyperparameter optimization**: Tune learning rate, depth, estimators
-6. **Attention mechanisms**: Let model focus on boom region
+1. **Smart ensemble**: Combine CNN + HistGBM with confidence weighting
+2. **Local refinement**: Fine-tune predictions in ±20 frame window
+3. **Three-model ensemble**: Add third model for median voting
+4. **Attention mechanisms**: Let CNN focus on boom region
+5. **Multi-task learning**: Predict frame + quality jointly
