@@ -62,16 +62,24 @@ class RunSummary:
                 with open(env_path) as f:
                     env = json.load(f)
 
+            # Handle both new and old metric naming
+            mae_mean = metrics.get('selective_mae_mean', metrics.get('mae_mean', float('nan')))
+            mae_std = metrics.get('selective_mae_std', metrics.get('mae_std', 0.0))
+            within_5_mean = metrics.get('selective_within_5_mean', metrics.get('within_5_mean', float('nan')) / 100)
+            within_5_std = metrics.get('selective_within_5_std', metrics.get('within_5_std', 0.0) / 100)
+            coverage_mean = metrics.get('coverage_mean', metrics.get('acceptance_rate_mean', 0.0) / 100)
+            coverage_std = metrics.get('coverage_std', metrics.get('acceptance_rate_std', 0.0) / 100)
+
             return cls(
                 path=run_dir,
                 timestamp=env.get('timestamp', 'unknown'),
                 git_commit=env.get('git_commit', 'unknown')[:8],
-                mae_mean=metrics.get('mae_mean', float('nan')),
-                mae_std=metrics.get('mae_std', 0.0),
-                within_5_mean=metrics.get('within_5_mean', float('nan')),
-                within_5_std=metrics.get('within_5_std', 0.0),
-                coverage_mean=metrics.get('acceptance_rate_mean', 0.0),
-                coverage_std=metrics.get('acceptance_rate_std', 0.0),
+                mae_mean=mae_mean,
+                mae_std=mae_std,
+                within_5_mean=within_5_mean,
+                within_5_std=within_5_std,
+                coverage_mean=coverage_mean,
+                coverage_std=coverage_std,
                 agreement_threshold=config.get('agreement_threshold', -1),
                 quality_threshold=config.get('quality_threshold', -1.0),
                 n_seeds=config.get('n_seeds', 0),

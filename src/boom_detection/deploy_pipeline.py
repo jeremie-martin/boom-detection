@@ -547,19 +547,19 @@ def main():
         if args.quick:
             # Single seed - just show the values
             r = results['seed_metrics'][0]
-            print(f"MAE: {r['selective_mae']:.2f} frames")
+            print(f"Selective MAE: {r['selective_mae']:.2f} frames")
             print(f"Within 5 frames: {r['selective_within_5']*100:.1f}%")
-            print(f"Acceptance rate: {r['coverage']*100:.1f}%")
+            print(f"Coverage: {r['coverage']*100:.1f}%")
             print()
             print("Note: This is a quick single-seed result. For robust evaluation,")
-            print("      run without --quick to get mean ± std across 5 seeds.")
+            print("      run without --quick to get mean +/- std across 5 seeds.")
         else:
-            # Multi-seed - show mean ± std
-            print(f"MAE: {results['mae_mean']:.2f} ± {results['mae_std']:.2f} frames")
-            print(f"Within 5 frames: {results['within_5_mean']:.1f}% ± {results['within_5_std']:.1f}%")
-            print(f"Acceptance rate: {results['acceptance_rate_mean']:.1f}% ± {results['acceptance_rate_std']:.1f}%")
+            # Multi-seed - show mean +/- std
+            print(f"Selective MAE: {results['mae_mean']:.2f} +/- {results['mae_std']:.2f} frames")
+            print(f"Within 5 frames: {results['within_5_mean']:.1f}% +/- {results['within_5_std']:.1f}%")
+            print(f"Coverage: {results['acceptance_rate_mean']:.1f}% +/- {results['acceptance_rate_std']:.1f}%")
             print()
-            print(f"Based on {results['n_seeds']} random seeds × {results['n_splits']}-fold CV")
+            print(f"Based on {results['n_seeds']} random seeds x {results['n_splits']}-fold CV")
 
         # Save run artifact if requested
         if args.save_run:
@@ -596,14 +596,14 @@ def main():
             with open(run_path / 'config.json', 'w') as f:
                 json.dump(run_config, f, indent=2)
 
-            # Save aggregated metrics
+            # Save aggregated metrics (use consistent "coverage" naming)
             metrics_data = {
-                'mae_mean': results['mae_mean'],
-                'mae_std': results['mae_std'],
-                'within_5_mean': results['within_5_mean'],
-                'within_5_std': results['within_5_std'],
-                'acceptance_rate_mean': results['acceptance_rate_mean'],
-                'acceptance_rate_std': results['acceptance_rate_std'],
+                'selective_mae_mean': results['mae_mean'],
+                'selective_mae_std': results['mae_std'],
+                'selective_within_5_mean': results['within_5_mean'] / 100,  # Store as fraction
+                'selective_within_5_std': results['within_5_std'] / 100,
+                'coverage_mean': results['acceptance_rate_mean'] / 100,  # Store as fraction
+                'coverage_std': results['acceptance_rate_std'] / 100,
             }
             with open(run_path / 'metrics.json', 'w') as f:
                 json.dump(metrics_data, f, indent=2)
