@@ -1,11 +1,11 @@
 # Boom Detection: Results Summary
 
-## Best Result: MAE 4.0 (Deployable)
+## Best Result: MAE 7.2 ± 1.1 frames (Robust Evaluation)
 
 The goal is producing **high-quality animations for YouTube/social media**, not detecting boom frames on all simulations. This means:
 - We only care about high-quality simulations
 - Rejecting low-quality simulations is acceptable (can generate more)
-- For accepted simulations, we need MAE close to 5 frames
+- For accepted simulations, we want accurate boom detection
 
 ### Deployable Pipeline
 
@@ -24,20 +24,24 @@ ELSE:
    → REJECT
 ```
 
-### Performance
+### Performance (Robust Multi-Seed Evaluation)
 
-| Configuration | Accepted | MAE | Within 5 | Within 3 |
-|--------------|----------|-----|----------|----------|
-| Agree≤5, PredQ≥0.55 | 27% | **4.0** | 77% | 62% |
-| Agree≤9, PredQ≥0.6 | 29% | 4.1 | 79% | 57% |
-| Agree≤5, PredQ≥0.6 | 24% | 4.25 | 75% | 58% |
+Results from 5-fold CV × 5 random seeds = 25 evaluations:
+
+| Metric | Mean ± Std |
+|--------|-----------|
+| MAE | **7.2 ± 1.1 frames** |
+| Within 5 frames | ~45% |
+| Acceptance rate | ~33% |
+
+**Important:** Earlier reported "MAE 4.0" was from a single favorable random seed. The true expected performance is MAE ~7 frames with high variance due to small sample size (49 simulations).
 
 ### Key Insights
 
 1. **Model agreement is the primary filter** - when CNN and HistGBM disagree, predictions are unreliable
 2. **Use HGB prediction, not average** - HGB alone is more accurate than CNN+HGB average when they agree
-3. **Predicted quality helps** - adds ~1-2 frame improvement over agreement-only
-4. **Quality threshold ~0.55 works best** - higher than initially expected
+3. **Predicted quality helps** - but improvement is modest
+4. **High variance** - with only 49 simulations, results vary by ±1-2 MAE depending on random split
 
 ---
 

@@ -9,9 +9,9 @@ The actual goal is: **Produce high-quality animations with accurate boom detecti
 This means:
 - We only care about HIGH-QUALITY simulations
 - Rejecting low-quality simulations is acceptable (can generate more)
-- For accepted simulations, we need MAE close to 5 frames
+- For accepted simulations, we want accurate boom detection
 
-**Current best**: MAE 4.0 with 27% acceptance rate (deployable pipeline)
+**Current best**: MAE 7.2 ± 1.1 frames with ~33% acceptance rate (robust 5-seed evaluation)
 
 ## What is the Boom?
 
@@ -39,11 +39,24 @@ if result['accepted']:
     boom_frame = result['boom_frame']  # Use HGB prediction
 ```
 
-### Fast Iteration
+### Robust Evaluation (IMPORTANT!)
 ```python
-# Use disk-cached features to skip 30s dataset loading
-cache = FeatureCache(config, cache_dir='.feature_cache')
-result = quick_cv(model, cache)  # ~0.2s to load features
+# Always use multi-seed evaluation for honest results
+from boom_detection.evaluation import CachedEvaluator
+
+evaluator = CachedEvaluator(dataset, cache)
+result = evaluator.cross_validate(
+    lambda: MyModel(),  # Factory function!
+    seeds=[42, 43, 44, 45, 46],  # 5 seeds
+)
+print(f"MAE: {result.mean_metrics['mae']:.2f} ± {result.std_metrics['mae']:.2f}")
+```
+
+### Fast Iteration (Development)
+```python
+# Quick single-seed for development (but report multi-seed for final results!)
+result = evaluator.quick_evaluate(lambda: MyModel(), seed=42)
+print(f"MAE: {result['mae']:.1f}")  # Single seed - don't report this!
 ```
 
 ### Adding a New Model
@@ -78,13 +91,15 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 
 ## Do
 
+- **Always use multi-seed evaluation** - report mean ± std, not single-seed results
+- Use `CachedEvaluator.cross_validate()` for robust evaluation
 - Use `FeatureCache` with `cache_dir` for persistence
-- Use `quick_cv()` for fast experiments
 - Use `HistGradientBoosting*` (not `GradientBoosting*`) - 500x faster
 - Split at simulation level (not frame level) to prevent data leakage
 
 ## Don't
 
+- **Don't report single-seed results** - they can vary by ±50% due to small sample size
 - Don't use `metadata.json` boom_frame (unreliable auto-detection)
 - Don't use oracle quality at inference (annotations not available)
 - Don't commit `.feature_cache/`

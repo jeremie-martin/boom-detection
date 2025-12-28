@@ -21,6 +21,11 @@ from .evaluation import (
     mae,
     median_ae,
     rmse,
+    # New robust evaluation framework
+    CachedEvaluator,
+    CachedPredictor,
+    MultiSeedResult,
+    robust_evaluate,
 )
 
 from .features import (
@@ -95,6 +100,11 @@ __all__ = [
     "mae",
     "median_ae",
     "rmse",
+    # Robust evaluation (new)
+    "CachedEvaluator",
+    "CachedPredictor",
+    "MultiSeedResult",
+    "robust_evaluate",
     # Features
     "FeatureExtractor",
     "FeatureConfig",

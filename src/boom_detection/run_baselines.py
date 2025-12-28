@@ -3,9 +3,11 @@ Run baseline predictors and compare results.
 
 Usage:
     uv run python -m boom_detection.run_baselines data
-    uv run python -m boom_detection.run_baselines data -n 10  # quick test
+    uv run python -m boom_detection.run_baselines data --quick  # single seed
+    uv run python -m boom_detection.run_baselines data -n 10    # limit samples
 
 This validates the evaluation framework and establishes baseline performance.
+Results are reported with proper uncertainty estimates (mean ± std).
 """
 
 from __future__ import annotations
@@ -195,34 +197,39 @@ class LinearRegressionPredictor:
 # =============================================================================
 
 def quick_cv(
-    predictor,
+    predictor_fn,
     cache: FeatureCache,
     data_path: str = 'data',
     k: int = 5,
-    seed: int = 42,
+    seeds: list[int] | None = None,
     task: str = 'frame',
     quality_threshold: float | None = None,
 ) -> dict:
     """
-    Run CV using only cached features - no dataset loading required.
+    Run robust multi-seed CV using only cached features.
 
     This is the fastest way to iterate: ~0.2s to load features vs ~30s for full dataset.
+    Uses multiple seeds by default for proper uncertainty estimates.
 
     Args:
-        predictor: Model with fit() and predict() methods
+        predictor_fn: Factory function returning a fresh predictor
+                     Example: lambda: FrameLevelClassifier(max_depth=7)
         cache: FeatureCache with disk caching enabled
         data_path: Path to data directory (for annotations.json)
         k: Number of CV folds
-        seed: Random seed
+        seeds: Random seeds (default: [42, 43, 44] for quick, or [42] for --quick)
         task: 'frame' for boom frame prediction, 'quality' for boom quality prediction
         quality_threshold: If set, filter to simulations with quality >= threshold
 
     Returns:
-        Dict with predictions, ground_truth, and metrics
+        Dict with mean_metrics, std_metrics, and per-seed results
     """
     from sklearn.model_selection import KFold
     from .loader import load_annotations
     import os
+
+    if seeds is None:
+        seeds = [42, 43, 44]  # 3 seeds by default for quick iteration
 
     # Load just the annotations (tiny file, instant)
     if os.path.isdir(data_path):
@@ -233,7 +240,7 @@ def quick_cv(
 
     # Load features from disk cache
     sim_ids = [a.id for a in annotations]
-    cache.load_from_disk(sim_ids, verbose=True)
+    cache.load_from_disk(sim_ids, verbose=False)
 
     # Filter to only simulations we have cached
     available = [a for a in annotations if a.id in cache]
@@ -254,23 +261,41 @@ def quick_cv(
     else:
         targets = np.array([a.boom_frame for a in annotations])
 
-    # Run CV
-    kf = KFold(n_splits=k, shuffle=True, random_state=seed)
-    all_preds = np.zeros(len(ids))
+    # Run CV with multiple seeds
+    all_seed_metrics = []
 
-    for train_idx, test_idx in kf.split(ids):
-        train_ids = [ids[i] for i in train_idx]
-        test_ids = [ids[i] for i in test_idx]
-        train_y = targets[train_idx]
+    for seed in seeds:
+        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+        all_preds = np.zeros(len(ids))
 
-        predictor.fit(train_ids, train_y, cache)
-        preds = predictor.predict(test_ids, cache)
-        all_preds[test_idx] = preds
+        for train_idx, test_idx in kf.split(ids):
+            train_ids = [ids[i] for i in train_idx]
+            test_ids = [ids[i] for i in test_idx]
+            train_y = targets[train_idx]
+
+            predictor = predictor_fn()  # Fresh predictor each fold
+            predictor.fit(train_ids, train_y, cache)
+            preds = predictor.predict(test_ids, cache)
+            all_preds[test_idx] = preds
+
+        metrics = compute_all_metrics(targets, all_preds, task=task)
+        all_seed_metrics.append(metrics)
+
+    # Aggregate across seeds
+    metric_names = list(all_seed_metrics[0].keys())
+    mean_metrics = {}
+    std_metrics = {}
+
+    for name in metric_names:
+        values = [m[name] for m in all_seed_metrics]
+        mean_metrics[name] = float(np.mean(values))
+        std_metrics[name] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
 
     return {
-        'predictions': all_preds,
-        'ground_truth': targets,
-        'metrics': compute_all_metrics(targets, all_preds, task=task),
+        'mean_metrics': mean_metrics,
+        'std_metrics': std_metrics,
+        'seed_metrics': all_seed_metrics,
+        'n_seeds': len(seeds),
     }
 
 
@@ -326,19 +351,27 @@ def cross_validate_cached(
     }
 
 
-def get_baselines(include_frame_level: bool = True) -> dict[str, object]:
-    """Get all baseline predictors."""
+def get_baselines(include_frame_level: bool = True) -> dict[str, callable]:
+    """
+    Get all baseline predictor factories.
+
+    Returns factory functions (not instances) so each seed gets a fresh model.
+    """
     baselines = {
-        'mean': MeanPredictor(),
-        'median': MedianPredictor(),
-        'variance_threshold': VarianceThresholdPredictor(),
-        'derivative_peak': DerivativeThresholdPredictor(),
-        'second_derivative': SecondDerivativePredictor(),
-        'linear_regression': LinearRegressionPredictor(),
+        'mean': lambda: MeanPredictor(),
+        'median': lambda: MedianPredictor(),
+        'variance_threshold': lambda: VarianceThresholdPredictor(),
+        'derivative_peak': lambda: DerivativeThresholdPredictor(),
+        'second_derivative': lambda: SecondDerivativePredictor(),
+        'linear_regression': lambda: LinearRegressionPredictor(),
     }
 
     if include_frame_level:
-        baselines.update(get_frame_level_predictors())
+        # Convert frame_level predictors to factories
+        frame_predictors = get_frame_level_predictors()
+        for name, predictor_class in frame_predictors.items():
+            # frame_level predictors are already instances, wrap them
+            baselines[name] = lambda p=predictor_class: p.__class__() if hasattr(p, '__class__') else p
 
     return baselines
 
@@ -346,11 +379,14 @@ def get_baselines(include_frame_level: bool = True) -> dict[str, object]:
 def run_baselines(
     data_path: str,
     k: int = 5,
-    seed: int = 42,
+    seeds: list[int] | None = None,
     max_samples: int | None = None,
     max_pendulums: int | None = 2000,
 ):
-    """Run all baselines and print comparison."""
+    """Run all baselines and print comparison with proper uncertainty."""
+    if seeds is None:
+        seeds = [42, 43, 44]  # 3 seeds for reasonable speed/robustness tradeoff
+
     print(f"Loading dataset from: {data_path}")
     if max_samples:
         print(f"Limiting to {max_samples} samples")
@@ -366,28 +402,48 @@ def run_baselines(
     # Extract features once
     print("Extracting features (one-time cost)...")
     t0 = time.time()
-    config = FeatureConfig(max_pendulums=max_pendulums) if max_pendulums else None
-    cache = FeatureCache(config=config)
+    config = FeatureConfig(max_pendulums=max_pendulums) if max_pendulums else FeatureConfig()
+    cache = FeatureCache(config=config, cache_dir='.feature_cache')
     cache.extract_all(dataset, verbose=True)
     n_features = cache[dataset.annotations[0].id].shape[1]
     print(f"Feature extraction: {time.time() - t0:.1f}s ({n_features} features)")
     print()
 
-    # Run baselines
+    # Run baselines with multi-seed CV
     baselines = get_baselines()
     results = {}
 
-    print(f"Running {k}-fold cross-validation (seed={seed})")
+    print(f"Running {k}-fold CV × {len(seeds)} seeds (robust evaluation)")
     print("=" * 60)
 
-    for name, predictor in baselines.items():
+    for name, predictor_factory in baselines.items():
         t0 = time.time()
         try:
-            result = cross_validate_cached(dataset, cache, predictor, k=k, seed=seed)
-            results[name] = result
-            m = result['metrics']
+            # Run multi-seed CV
+            all_metrics = []
+            for seed in seeds:
+                result = cross_validate_cached(dataset, cache, predictor_factory(), k=k, seed=seed)
+                all_metrics.append(result['metrics'])
+
+            # Aggregate
+            mean_metrics = {}
+            std_metrics = {}
+            for metric_name in all_metrics[0].keys():
+                values = [m[metric_name] for m in all_metrics]
+                mean_metrics[metric_name] = np.mean(values)
+                std_metrics[metric_name] = np.std(values, ddof=1) if len(values) > 1 else 0.0
+
+            results[name] = {
+                'mean_metrics': mean_metrics,
+                'std_metrics': std_metrics,
+            }
+
             elapsed = time.time() - t0
-            print(f"{name:<25} MAE={m['mae']:>6.1f}  within_10={m['within_10']:>5.0%}  ({elapsed:.2f}s)")
+            mae_mean = mean_metrics['mae']
+            mae_std = std_metrics['mae']
+            w10_mean = mean_metrics['within_10']
+            print(f"{name:<25} MAE={mae_mean:>5.1f}±{mae_std:>4.1f}  within_10={w10_mean:>5.0%}  ({elapsed:.1f}s)")
+
         except Exception as e:
             print(f"{name:<25} ERROR: {e}")
             import traceback
@@ -396,39 +452,51 @@ def run_baselines(
     # Summary table
     print()
     print("=" * 60)
-    print("SUMMARY - Boom Frame Prediction")
+    print(f"SUMMARY - Boom Frame Prediction ({len(seeds)} seeds)")
     print("=" * 60)
-    print(f"{'Method':<25} {'MAE':>8} {'MedAE':>8} {'W/in 5':>8} {'W/in 10':>8} {'Corr':>8}")
-    print("-" * 70)
+    print(f"{'Method':<25} {'MAE':>12} {'MedAE':>12} {'W/in 5':>12} {'W/in 10':>12}")
+    print("-" * 75)
 
-    sorted_results = sorted(results.items(), key=lambda x: x[1]['metrics']['mae'])
+    sorted_results = sorted(results.items(), key=lambda x: x[1]['mean_metrics']['mae'])
     for name, result in sorted_results:
-        m = result['metrics']
-        print(f"{name:<25} {m['mae']:>8.1f} {m['median_ae']:>8.1f} {m['within_5']:>7.0%} {m['within_10']:>8.0%} {m['correlation']:>8.2f}")
+        m = result['mean_metrics']
+        s = result['std_metrics']
+        print(f"{name:<25} {m['mae']:>5.1f}±{s['mae']:<5.1f} {m['median_ae']:>5.1f}±{s['median_ae']:<5.1f} "
+              f"{m['within_5']*100:>4.0f}±{s['within_5']*100:<4.0f}% {m['within_10']*100:>4.0f}±{s['within_10']*100:<4.0f}%")
 
     if sorted_results:
         best_name, best_result = sorted_results[0]
-        print("-" * 70)
-        print(f"Best: {best_name} with MAE = {best_result['metrics']['mae']:.1f} frames")
+        m = best_result['mean_metrics']
+        s = best_result['std_metrics']
+        print("-" * 75)
+        print(f"Best: {best_name} with MAE = {m['mae']:.1f} ± {s['mae']:.1f} frames")
 
     return results
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Run baseline predictors")
+    parser = argparse.ArgumentParser(description="Run baseline predictors with robust multi-seed evaluation")
     parser.add_argument("data_path", nargs="?", default="data", help="Path to data directory")
     parser.add_argument("-n", "--max-samples", type=int, default=None, help="Limit samples (for quick testing)")
     parser.add_argument("-p", "--max-pendulums", type=int, default=2000, help="Subsample pendulums (default: 2000, 0=all)")
     parser.add_argument("-k", "--folds", type=int, default=5, help="Number of CV folds")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--quick", action="store_true", help="Quick single-seed evaluation")
+    parser.add_argument("--seeds", type=int, default=3, help="Number of random seeds (default: 3)")
     args = parser.parse_args()
 
     max_pendulums = args.max_pendulums if args.max_pendulums > 0 else None
+
+    # Determine seeds
+    if args.quick:
+        seeds = [42]
+    else:
+        seeds = list(range(42, 42 + args.seeds))
+
     run_baselines(
         args.data_path,
         k=args.folds,
-        seed=args.seed,
+        seeds=seeds,
         max_samples=args.max_samples,
         max_pendulums=max_pendulums,
     )

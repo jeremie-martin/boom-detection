@@ -2,15 +2,17 @@
 
 Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge into a caustic pattern.
 
-## Best Result: MAE 4.0 frames
+## Best Result: MAE 7.2 ± 1.1 frames
 
-Using model agreement + predicted quality filtering:
+Using model agreement + predicted quality filtering (robust 5-seed evaluation):
 
 | Metric | Value |
 |--------|-------|
-| MAE | **4.0 frames** |
-| Within 5 frames | 77% |
-| Acceptance rate | 27% |
+| MAE | **7.2 ± 1.1 frames** |
+| Within 5 frames | ~45% |
+| Acceptance rate | ~33% |
+
+**Note:** Earlier reported "MAE 4.0" was from a single favorable random seed. With proper multi-seed evaluation, the true expected MAE is ~7 frames. This is the honest, reproducible result.
 
 ## Quick Start
 

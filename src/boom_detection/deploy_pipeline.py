@@ -7,15 +7,20 @@ This implements the best-performing approach:
 3. Predict quality using features around predicted boom
 4. If both filters pass → use HGB prediction
 
-Best configuration:
-- Agreement threshold: ≤5 frames
-- Predicted quality threshold: ≥0.55
-- Use HGB prediction (not average)
-- Result: MAE 4.0, 77% within 5 frames, 27% acceptance rate
+Performance (5-fold CV × 5 seeds):
+- MAE: 7.2 ± 1.1 frames (on accepted simulations)
+- Acceptance rate: ~33%
+- Within 5 frames: ~45%
+
+Note: Earlier reported "MAE 4.0" was from a single favorable random seed.
+With proper multi-seed evaluation, the true expected MAE is ~7 frames.
 
 Usage:
-    # Evaluate on dataset with cross-validation
+    # Evaluate with robust multi-seed CV
     uv run python -m boom_detection.deploy_pipeline data --evaluate
+
+    # Quick single-seed evaluation (for development)
+    uv run python -m boom_detection.deploy_pipeline data --evaluate --quick
 
     # Train final models and save
     uv run python -m boom_detection.deploy_pipeline data --train --output models/
@@ -176,65 +181,104 @@ def cross_validate(
     qualities: np.ndarray,
     cache: FeatureCache,
     n_splits: int = 5,
+    seeds: list[int] | None = None,
     agreement_threshold: int = 5,
     quality_threshold: float = 0.55,
+    verbose: bool = True,
 ) -> dict:
     """
-    Run cross-validation and return metrics.
+    Run robust multi-seed cross-validation.
+
+    Args:
+        sim_ids: List of simulation IDs
+        boom_frames: Ground truth boom frames
+        qualities: Ground truth quality scores
+        cache: FeatureCache with extracted features
+        n_splits: Number of CV folds
+        seeds: Random seeds (default: 5 seeds for robust evaluation)
+        agreement_threshold: Max allowed disagreement between CNN and HGB
+        quality_threshold: Min predicted quality to accept
+        verbose: Print progress
+
+    Returns:
+        Dict with metrics including mean ± std across seeds
     """
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    if seeds is None:
+        seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
 
-    all_results = []
-    all_true = []
-    all_qualities = []
+    all_seed_results = []
 
-    for fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
-        train_ids = [sim_ids[i] for i in train_idx]
-        test_ids = [sim_ids[i] for i in test_idx]
-        train_booms = boom_frames[train_idx]
-        test_booms = boom_frames[test_idx]
-        train_quals = qualities[train_idx]
-        test_quals = qualities[test_idx]
+    for seed_idx, seed in enumerate(seeds):
+        if verbose:
+            print(f"\nSeed {seed} ({seed_idx + 1}/{len(seeds)})")
 
-        # Train pipeline
-        pipeline = BoomDetectionPipeline(
-            agreement_threshold=agreement_threshold,
-            quality_threshold=quality_threshold,
-        )
-        pipeline.fit(train_ids, train_booms, train_quals, cache)
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        seed_results = []
 
-        # Predict
-        results = pipeline.predict(test_ids, cache)
+        for fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
+            train_ids = [sim_ids[i] for i in train_idx]
+            test_ids = [sim_ids[i] for i in test_idx]
+            train_booms = boom_frames[train_idx]
+            test_booms = boom_frames[test_idx]
+            train_quals = qualities[train_idx]
+            test_quals = qualities[test_idx]
 
-        for i, (res, true_boom, true_qual) in enumerate(zip(results, test_booms, test_quals)):
-            res['true_boom'] = int(true_boom)
-            res['true_quality'] = float(true_qual)
-            all_results.append(res)
-            all_true.append(true_boom)
-            all_qualities.append(true_qual)
+            # Train pipeline
+            pipeline = BoomDetectionPipeline(
+                agreement_threshold=agreement_threshold,
+                quality_threshold=quality_threshold,
+            )
+            pipeline.fit(train_ids, train_booms, train_quals, cache)
 
-        print(f"  Fold {fold + 1}/{n_splits} complete")
+            # Predict
+            results = pipeline.predict(test_ids, cache)
 
-    # Compute metrics
-    accepted = [r for r in all_results if r['accepted']]
-    rejected = [r for r in all_results if not r['accepted']]
+            for res, true_boom, true_qual in zip(results, test_booms, test_quals):
+                res['true_boom'] = int(true_boom)
+                res['true_quality'] = float(true_qual)
+                seed_results.append(res)
 
-    if accepted:
-        errors = [abs(r['hgb_pred'] - r['true_boom']) for r in accepted]
-        mae = np.mean(errors)
-        within5 = np.mean([e <= 5 for e in errors]) * 100
-        within3 = np.mean([e <= 3 for e in errors]) * 100
-    else:
-        mae = within5 = within3 = float('nan')
+        # Compute metrics for this seed
+        accepted = [r for r in seed_results if r['accepted']]
+        if accepted:
+            errors = [abs(r['hgb_pred'] - r['true_boom']) for r in accepted]
+            seed_mae = np.mean(errors)
+            seed_within5 = np.mean([e <= 5 for e in errors]) * 100
+            seed_acceptance = len(accepted) / len(seed_results) * 100
+        else:
+            seed_mae = float('nan')
+            seed_within5 = float('nan')
+            seed_acceptance = 0.0
+
+        all_seed_results.append({
+            'mae': seed_mae,
+            'within_5': seed_within5,
+            'acceptance_rate': seed_acceptance,
+            'n_accepted': len(accepted),
+        })
+
+        if verbose:
+            print(f"  MAE: {seed_mae:.2f}, Accepted: {len(accepted)}/{len(seed_results)}")
+
+    # Aggregate across seeds
+    maes = [r['mae'] for r in all_seed_results if not np.isnan(r['mae'])]
+    within5s = [r['within_5'] for r in all_seed_results if not np.isnan(r['within_5'])]
+    acceptances = [r['acceptance_rate'] for r in all_seed_results]
 
     return {
-        'n_total': len(all_results),
-        'n_accepted': len(accepted),
-        'n_rejected': len(rejected),
-        'acceptance_rate': len(accepted) / len(all_results) * 100,
-        'mae': mae,
-        'within_5': within5,
-        'within_3': within3,
+        'n_seeds': len(seeds),
+        'n_splits': n_splits,
+        'seeds': seeds,
+        # Main metrics with uncertainty
+        'mae_mean': float(np.mean(maes)) if maes else float('nan'),
+        'mae_std': float(np.std(maes, ddof=1)) if len(maes) > 1 else 0.0,
+        'within_5_mean': float(np.mean(within5s)) if within5s else float('nan'),
+        'within_5_std': float(np.std(within5s, ddof=1)) if len(within5s) > 1 else 0.0,
+        'acceptance_rate_mean': float(np.mean(acceptances)),
+        'acceptance_rate_std': float(np.std(acceptances, ddof=1)) if len(acceptances) > 1 else 0.0,
+        # Per-seed results for analysis
+        'seed_results': all_seed_results,
+        # Config
         'agreement_threshold': agreement_threshold,
         'quality_threshold': quality_threshold,
     }
@@ -244,6 +288,7 @@ def main():
     parser = argparse.ArgumentParser(description='Boom detection pipeline')
     parser.add_argument('data_path', type=Path, help='Path to data directory')
     parser.add_argument('--evaluate', action='store_true', help='Run cross-validation')
+    parser.add_argument('--quick', action='store_true', help='Quick single-seed evaluation')
     parser.add_argument('--train', action='store_true', help='Train and save models')
     parser.add_argument('--output', type=Path, help='Output directory for models')
     parser.add_argument('--agreement', type=int, default=5, help='Agreement threshold')
@@ -262,29 +307,45 @@ def main():
     print("Building feature cache...")
     config = FeatureConfig()
     cache = FeatureCache(config, cache_dir='.feature_cache')
-    cache.build(dataset)
+    cache.extract_all(dataset, verbose=False)
 
     if args.evaluate:
-        print(f"\nRunning 5-fold cross-validation...")
+        # Determine seeds based on --quick flag
+        seeds = [42] if args.quick else [42, 43, 44, 45, 46]
+        mode = "quick (1 seed)" if args.quick else "robust (5 seeds)"
+
+        print(f"\nRunning {mode} 5-fold cross-validation...")
         print(f"Agreement threshold: {args.agreement}")
         print(f"Quality threshold: {args.quality}")
 
         results = cross_validate(
             sim_ids, boom_frames, qualities, cache,
+            seeds=seeds,
             agreement_threshold=args.agreement,
             quality_threshold=args.quality,
         )
 
-        print(f"\n{'='*50}")
+        print()
+        print("=" * 60)
         print("RESULTS")
-        print(f"{'='*50}")
-        print(f"Total simulations: {results['n_total']}")
-        print(f"Accepted: {results['n_accepted']} ({results['acceptance_rate']:.1f}%)")
-        print(f"Rejected: {results['n_rejected']}")
-        print(f"\nOn accepted simulations:")
-        print(f"  MAE: {results['mae']:.2f} frames")
-        print(f"  Within 5 frames: {results['within_5']:.1f}%")
-        print(f"  Within 3 frames: {results['within_3']:.1f}%")
+        print("=" * 60)
+
+        if args.quick:
+            # Single seed - just show the values
+            r = results['seed_results'][0]
+            print(f"MAE: {r['mae']:.2f} frames")
+            print(f"Within 5 frames: {r['within_5']:.1f}%")
+            print(f"Acceptance rate: {r['acceptance_rate']:.1f}%")
+            print()
+            print("Note: This is a quick single-seed result. For robust evaluation,")
+            print("      run without --quick to get mean ± std across 5 seeds.")
+        else:
+            # Multi-seed - show mean ± std
+            print(f"MAE: {results['mae_mean']:.2f} ± {results['mae_std']:.2f} frames")
+            print(f"Within 5 frames: {results['within_5_mean']:.1f}% ± {results['within_5_std']:.1f}%")
+            print(f"Acceptance rate: {results['acceptance_rate_mean']:.1f}% ± {results['acceptance_rate_std']:.1f}%")
+            print()
+            print(f"Based on {results['n_seeds']} random seeds × {results['n_splits']}-fold CV")
 
     if args.train:
         if not args.output:
