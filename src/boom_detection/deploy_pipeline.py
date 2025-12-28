@@ -501,13 +501,22 @@ class BoomDetectionPipeline:
             >>> if result.accepted:
             ...     print(f"Boom at frame {result.boom_frame}")
         """
-        from .features import extract_features
+        from .features import FeatureExtractor
 
         if self.cnn is None:
             raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
 
+        # Wrap raw array in a simple object with .data attribute
+        # (FeatureExtractor.transform expects simulation.data)
+        class SimulationWrapper:
+            def __init__(self, data):
+                self.data = data
+
+        wrapped = SimulationWrapper(simulation)
+
         # Extract features using the saved config
-        features = extract_features(simulation, config=self.feature_config)
+        extractor = FeatureExtractor(self.feature_config)
+        features = extractor.transform(wrapped)
 
         # Validate feature count matches training
         if features.shape[1] != self.n_features:
