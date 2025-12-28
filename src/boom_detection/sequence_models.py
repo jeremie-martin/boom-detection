@@ -61,7 +61,12 @@ class CNNClassifier(nn.Module):
         dropout: float = 0.3,
     ):
         super().__init__()
+        # Store original constructor args for serialization
         self.n_features = n_features
+        self.hidden_dim = hidden_dim
+        self.kernel_sizes = kernel_sizes
+        self.dropout = dropout
+
         self.n_branches = len(kernel_sizes)
         self.branch_dim = hidden_dim // self.n_branches
 

@@ -162,17 +162,6 @@ class TestPipelineOutput:
         for result in results:
             assert isinstance(result, SelectivePrediction)
 
-    def test_predict_dict_returns_dicts(self, trained_pipeline):
-        """predict_dict should return list of dicts for backward compatibility."""
-        pipeline, cache = trained_pipeline
-        sim_ids = [f"sim_{i}" for i in range(5)]
-        results = pipeline.predict_dict(sim_ids, cache)
-
-        assert len(results) == 5
-        for result in results:
-            assert isinstance(result, dict)
-            assert 'boom_frame' in result
-
 
 class TestAcceptanceLogic:
     """Tests for acceptance/rejection logic."""

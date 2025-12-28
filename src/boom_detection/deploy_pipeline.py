@@ -280,10 +280,6 @@ class BoomDetectionPipeline:
         """Predict for multiple simulations."""
         return [self.predict_one(cache[sid]) for sid in sim_ids]
 
-    def predict_dict(self, sim_ids: list[str], cache: FeatureCache) -> list[dict]:
-        """Predict for multiple simulations, returning dicts (for backward compatibility)."""
-        return [self.predict_one(cache[sid]).to_dict() for sid in sim_ids]
-
     def save(self, path: Path) -> None:
         """
         Save the pipeline to a directory.
@@ -306,12 +302,13 @@ class BoomDetectionPipeline:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # Save CNN
+        # Save CNN with exact architecture parameters
         torch.save({
             'state_dict': self.cnn.state_dict(),
-            'n_features': self.n_features,
-            'hidden_dim': self.cnn.branch_dim * self.cnn.n_branches,
-            'n_branches': self.cnn.n_branches,
+            'n_features': self.cnn.n_features,
+            'hidden_dim': self.cnn.hidden_dim,
+            'kernel_sizes': self.cnn.kernel_sizes,
+            'dropout': self.cnn.dropout,
         }, path / 'cnn.pt')
 
         # Save HGB and quality model
@@ -366,12 +363,13 @@ class BoomDetectionPipeline:
         pipeline.n_features = config['n_features']
         pipeline.quality_feature_indices = config['quality_feature_indices']
 
-        # Load CNN
+        # Load CNN with exact saved architecture
         checkpoint = torch.load(path / 'cnn.pt', map_location='cpu', weights_only=True)
         pipeline.cnn = CNNClassifier(
             n_features=checkpoint['n_features'],
-            hidden_dim=checkpoint.get('hidden_dim', 64),
-            kernel_sizes=(5, 11, 21),  # Default architecture
+            hidden_dim=checkpoint['hidden_dim'],
+            kernel_sizes=tuple(checkpoint['kernel_sizes']),
+            dropout=checkpoint.get('dropout', 0.3),
         )
         pipeline.cnn.load_state_dict(checkpoint['state_dict'])
 
