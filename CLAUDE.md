@@ -11,7 +11,10 @@ This means:
 - Rejecting low-quality simulations is acceptable (can generate more)
 - For accepted simulations, we want accurate boom detection
 
-**Current best**: MAE 6.4 ± 0.5 frames with ~35% acceptance rate (robust 5-seed evaluation)
+**Current best (90 simulations, 5-seed evaluation)**:
+- Default (linear/10): MAE 8.5 ± 1.9 frames at 39% coverage
+- Balanced (sqrt/15): MAE 6.7 ± 2.1 frames at 29% coverage
+- Most selective (sqrt/5): MAE 3.9 ± 0.6 frames at 13% coverage
 
 **Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
@@ -25,11 +28,15 @@ The boom is the moment of chaotic divergence: when nearly-identical pendulums su
 ```python
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# Train pipeline
+# Train pipeline with different selectivity levels:
+# - Default: accept_threshold=0.60, agreement_formula='linear', agreement_scale=10
+# - Balanced: agreement_formula='sqrt', agreement_scale=15
+# - Most selective: agreement_formula='sqrt', agreement_scale=5
 pipeline = BoomDetectionPipeline(
-    agreement_threshold=5,
-    quality_threshold=0.55,
-    calibrate_quality=True,  # Calibrate quality predictions
+    accept_threshold=0.60,
+    agreement_formula='sqrt',  # 'linear' or 'sqrt'
+    agreement_scale=15.0,      # Default: 10 for linear, 15 for sqrt
+    calibrate_quality=True,
 )
 pipeline.fit(sim_ids, boom_frames, qualities, cache)
 
@@ -61,7 +68,7 @@ print(f"MAE: {result.mean_metrics['mae']:.2f} ± {result.std_metrics['mae']:.2f}
 
 # For selective (abstaining) models like BoomDetectionPipeline:
 result = evaluator.cross_validate_selective(
-    lambda: BoomDetectionPipeline(agreement_threshold=5),
+    lambda: BoomDetectionPipeline(accept_threshold=0.60, agreement_formula='sqrt'),
     seeds=[42, 43, 44, 45, 46],
 )
 print(f"Selective MAE: {result.mean_metrics['selective_mae']:.2f}")
@@ -143,8 +150,9 @@ artifact.save(Path("runs/my_experiment"))
 ## Key Findings
 
 1. **Model agreement is the best confidence signal** - better than quality prediction alone
-2. **Use CNN, not HGB or average** - CNN is more accurate (MAE 7.1 vs 11.0) and has lower variance
-3. **Quality threshold 0.55 works** - higher than initially expected
-4. **CNN benefits from all features**, HistGBM benefits from feature selection
+2. **Use CNN, not HGB or average** - CNN is more accurate and has lower variance
+3. **Sqrt agreement formula with scale=15 is a good balance** - MAE 6.7 at 29% coverage
+4. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
+5. **Frame-level HistGBM classifier is best baseline** - MAE 23.3±1.8 at 54% within-10
 
-See `docs/RESULTS.md` for detailed results.
+See experiment scripts in `scripts/` for detailed results.
