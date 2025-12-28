@@ -174,6 +174,20 @@ When CNN and HistGBM agree within 5 frames:
 
 This suggests we should use specialized feature sets.
 
+### 4. Why 65% Are Rejected
+
+Rejection breakdown (from 5-seed analysis):
+
+| Reason | Percentage | High-Q Rejected |
+|--------|------------|-----------------|
+| Agreement fail | 51% | 45% |
+| Quality fail | 15% | 60% |
+| Accepted | 34% | - |
+
+**Key insight**: Many high-quality simulations are rejected because the models genuinely struggle with them (18+ frame error). The filters correctly identify "hard" cases where predictions would be unreliable.
+
+This suggests improving individual model accuracy would help more than tuning the filters.
+
 ---
 
 ## Progress History
