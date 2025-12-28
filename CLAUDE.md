@@ -128,6 +128,71 @@ artifact.save(Path("runs/my_experiment"))
 | `pipeline.py` | Multi-stage pipeline components |
 | `ensemble.py` | Adaptive ensemble |
 
+## Memory Management
+
+### Critical: Two-phase pattern for evaluation scripts
+
+Raw simulation data is **~35GB for 90 simulations**. Use this two-phase pattern:
+
+```python
+import gc
+from boom_detection.loader import load_dataset
+from boom_detection.features import FeatureCache, FeatureConfig
+from boom_detection.logging_config import log_memory_usage
+
+# PHASE 1: Extract features (requires raw data)
+dataset = load_dataset('data', verbose=False)
+log_memory_usage("after loading")  # ~35 GB
+
+# Extract all configs you need FIRST
+for name, config in configs:
+    cache = FeatureCache(config=config, cache_dir=f'.feature_cache/{name}')
+    cache.extract_all(dataset, n_jobs=4)  # Cached to disk
+    del cache
+    gc.collect()
+
+# CRITICAL: Release raw data immediately after extraction
+dataset.release_simulation_data()
+gc.collect()
+log_memory_usage("after release")  # Should be ~1 GB
+
+# PHASE 2: Evaluate using disk caches (no raw data needed)
+for name, config in configs:
+    cache = FeatureCache(config=config, cache_dir=f'.feature_cache/{name}')
+    sim_ids = [a.id for a in dataset.annotations]
+    cache.load_from_disk(sim_ids, verbose=False)  # Load from disk, not extract!
+
+    result = evaluate(dataset, cache)
+
+    del cache
+    gc.collect()
+```
+
+### Simple single-config case
+
+For simple scripts testing one config:
+
+```python
+dataset = load_dataset('data', verbose=False)
+cache = FeatureCache(config=config, cache_dir='.feature_cache/my_config')
+cache.extract_all(dataset, auto_release=True)  # auto_release frees 35GB automatically
+
+# Now dataset.simulations is empty, but features are cached
+result = evaluate(dataset, cache)
+```
+
+### Memory budget
+
+| Phase | Memory |
+|-------|--------|
+| Initial | ~0.5 GB |
+| After load_dataset | ~35 GB |
+| After release_simulation_data | ~1 GB |
+| Per feature cache (in memory) | ~1.5 GB |
+| During model training | +2-3 GB |
+
+**Target**: Scripts should stay under 5GB after releasing simulation data.
+
 ## Do
 
 - **Always use multi-seed evaluation** - report mean ± std, not single-seed results

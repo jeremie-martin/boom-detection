@@ -186,7 +186,7 @@ def run_calibration_check(
     # Set up feature cache
     config = FeatureConfig(max_pendulums=2000)
     cache = FeatureCache(config=config, cache_dir='.feature_cache')
-    cache.extract_all(dataset, verbose=verbose)
+    cache.extract_all(dataset, verbose=verbose, auto_release=True)
 
     # Get data
     sim_ids = [a.id for a in dataset.annotations]

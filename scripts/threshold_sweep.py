@@ -93,10 +93,10 @@ def run_threshold_sweep(
     dataset = load_dataset(data_path, verbose=verbose)
     print(f"Loaded {len(dataset)} simulations")
 
-    # Set up feature cache
+    # Set up feature cache with auto_release to free 35GB after extraction
     config = FeatureConfig(max_pendulums=2000)
     cache = FeatureCache(config=config, cache_dir='.feature_cache')
-    cache.extract_all(dataset, verbose=verbose)
+    cache.extract_all(dataset, verbose=verbose, auto_release=True)
     n_features = cache[dataset.annotations[0].id].shape[1]
 
     # Get data

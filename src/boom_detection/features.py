@@ -374,69 +374,174 @@ def _coverage_from_angles(angles: np.ndarray, n_bins: int = 36) -> np.ndarray:
     return _birthday_corrected_coverage(counts, n_pendulums)
 
 
-def caustic_features(data: np.ndarray, n_bins: int = 36) -> np.ndarray:
+def _normalized_entropy(counts: np.ndarray) -> np.ndarray:
+    """
+    Compute normalized entropy (0-1) of histogram.
+
+    High entropy = uniform distribution, low = concentrated.
+    We return 1-entropy so high = concentrated (like R).
+
+    Args:
+        counts: Shape (frames, n_bins) - histogram counts
+
+    Returns:
+        Shape (frames,) - 1-entropy values in [0, 1]
+    """
+    # Normalize to probabilities
+    total = counts.sum(axis=1, keepdims=True)
+    total = np.where(total < 1e-9, 1, total)
+    probs = counts / total
+
+    # Compute entropy: -sum(p * log(p))
+    log_probs = np.where(probs > 0, np.log(probs), 0)
+    entropy = -np.sum(probs * log_probs, axis=1)
+
+    # Normalize by max entropy (log(n_bins))
+    max_entropy = np.log(counts.shape[1])
+    if max_entropy > 1e-9:
+        normalized = entropy / max_entropy
+    else:
+        normalized = np.zeros_like(entropy)
+
+    # Return 1-entropy so high = concentrated
+    return 1 - normalized
+
+
+def _dispersion_from_angles(angles: np.ndarray) -> np.ndarray:
+    """
+    Compute dispersion (1 - R) from angles.
+
+    High dispersion = angles spread out (good for boom detection).
+    This is the inverse of mean resultant length.
+
+    Args:
+        angles: Shape (frames, pendulums)
+
+    Returns:
+        Shape (frames,) - 1-R values in [0, 1]
+    """
+    R = _mean_resultant_length(angles)
+    return 1 - R
+
+
+def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy') -> np.ndarray:
     """
     Compute caustic/angular distribution features.
 
     These capture angular clustering patterns that simple statistics miss.
 
-    Key insight from investigation: Plain COVERAGE is the best predictor,
-    better than coverage × gini. The joint_concentration feature now uses
-    coverage instead of coverage × gini.
+    Formulas available:
+    - 'legacy': Full 9-feature set including coverage×gini and coverage-only (default)
+    - 'coverage': Coverage-only (best for single-feature), returns 4 features
+    - 'dispersion': 1-R (circular dispersion), returns 4 features
+    - 'entropy': 1-normalized_entropy, returns 4 features
+    - 'coverage_dispersion': coverage × (1-R), returns 4 features
 
-    Features:
-    1. angular_causticness: coverage × gini of (θ1 + θ2) [legacy]
-    2. tip_causticness: coverage × gini of tip direction [legacy]
-    3. joint_concentration: coverage(θ1) × coverage(θ2) [IMPROVED]
+    Legacy features (when formula='legacy'):
+    1. angular_causticness: coverage × gini of (θ1 + θ2)
+    2. tip_causticness: coverage × gini of tip direction
+    3. joint_concentration: coverage(θ1) × coverage(θ2)
     4. organization_causticness: (1 - R1*R2) × coverage
-    5. th1_causticness: coverage × gini of θ1 [legacy]
-    6. th2_causticness: coverage × gini of θ2 [legacy]
-    7. tip_coverage: coverage of (θ1 + θ2) [NEW - best single feature]
-    8. th1_coverage: coverage of θ1 alone [NEW]
-    9. th2_coverage: coverage of θ2 alone [NEW]
+    5. th1_causticness: coverage × gini of θ1
+    6. th2_causticness: coverage × gini of θ2
+    7. tip_coverage: coverage of (θ1 + θ2) [best single feature]
+    8. th1_coverage: coverage of θ1 alone
+    9. th2_coverage: coverage of θ2 alone
+
+    Simplified features (other formulas):
+    1. tip_feat: formula applied to (θ1 + θ2)
+    2. th1_feat: formula applied to θ1
+    3. th2_feat: formula applied to θ2
+    4. joint: th1_feat × th2_feat
 
     Args:
         data: Shape (frames, pendulums, 8)
         n_bins: Number of angular bins (36 = 10° bins)
+        formula: Which formula to use ('legacy', 'coverage', 'dispersion', 'entropy', 'coverage_dispersion')
 
     Returns:
-        Shape (frames, 9) - the nine caustic metrics
+        Shape (frames, 9) for 'legacy', (frames, 4) for other formulas
     """
     th1 = data[:, :, TH1]
     th2 = data[:, :, TH2]
-    x2 = data[:, :, X2]
-    y2 = data[:, :, Y2]
-    n_pendulums = data.shape[1]
+    tip_angles = th1 + th2
 
-    # Combined tip angle (θ1 + θ2)
-    tip_angles_from_theta = th1 + th2
+    if formula == 'legacy':
+        # Full 9-feature legacy implementation
+        x2 = data[:, :, X2]
+        y2 = data[:, :, Y2]
 
-    # Legacy causticness features (coverage × gini)
-    angular_caust = _causticness_from_angles(tip_angles_from_theta, n_bins)
-    tip_angles_from_pos = np.arctan2(x2, y2)
-    tip_caust = _causticness_from_angles(tip_angles_from_pos, n_bins)
-    th1_caust = _causticness_from_angles(th1, n_bins)
-    th2_caust = _causticness_from_angles(th2, n_bins)
+        # Legacy causticness features (coverage × gini)
+        angular_caust = _causticness_from_angles(tip_angles, n_bins)
+        tip_angles_from_pos = np.arctan2(x2, y2)
+        tip_caust = _causticness_from_angles(tip_angles_from_pos, n_bins)
+        th1_caust = _causticness_from_angles(th1, n_bins)
+        th2_caust = _causticness_from_angles(th2, n_bins)
 
-    # NEW: Coverage-only features (better than coverage × gini!)
-    tip_coverage = _coverage_from_angles(tip_angles_from_theta, n_bins)
-    th1_coverage = _coverage_from_angles(th1, n_bins)
-    th2_coverage = _coverage_from_angles(th2, n_bins)
+        # Coverage-only features (better than coverage × gini!)
+        tip_coverage = _coverage_from_angles(tip_angles, n_bins)
+        th1_coverage = _coverage_from_angles(th1, n_bins)
+        th2_coverage = _coverage_from_angles(th2, n_bins)
 
-    # IMPROVED: Joint concentration now uses coverage × coverage
-    # (was coverage×gini × coverage×gini, which had near-zero correlation)
-    joint_conc = th1_coverage * th2_coverage
+        # Joint concentration: coverage × coverage
+        joint_conc = th1_coverage * th2_coverage
 
-    # Organization causticness: spread (low concentration) × coverage
-    R1 = _mean_resultant_length(th1)
-    R2 = _mean_resultant_length(th2)
-    org_caust = (1 - R1 * R2) * tip_coverage
+        # Organization causticness: spread (low concentration) × coverage
+        R1 = _mean_resultant_length(th1)
+        R2 = _mean_resultant_length(th2)
+        org_caust = (1 - R1 * R2) * tip_coverage
 
-    return np.stack([
-        angular_caust, tip_caust, joint_conc, org_caust,
-        th1_caust, th2_caust,
-        tip_coverage, th1_coverage, th2_coverage
-    ], axis=1)
+        return np.stack([
+            angular_caust, tip_caust, joint_conc, org_caust,
+            th1_caust, th2_caust,
+            tip_coverage, th1_coverage, th2_coverage
+        ], axis=1)
+
+    elif formula == 'coverage':
+        # Plain coverage (best single-feature predictor)
+        tip_feat = _coverage_from_angles(tip_angles, n_bins)
+        th1_feat = _coverage_from_angles(th1, n_bins)
+        th2_feat = _coverage_from_angles(th2, n_bins)
+        joint = th1_feat * th2_feat
+
+    elif formula == 'dispersion':
+        # 1 - R (circular dispersion)
+        tip_feat = _dispersion_from_angles(tip_angles)
+        th1_feat = _dispersion_from_angles(th1)
+        th2_feat = _dispersion_from_angles(th2)
+        joint = th1_feat * th2_feat
+
+    elif formula == 'entropy':
+        # 1 - normalized_entropy
+        tip_hist = _angular_histogram(tip_angles, n_bins)
+        th1_hist = _angular_histogram(th1, n_bins)
+        th2_hist = _angular_histogram(th2, n_bins)
+        tip_feat = _normalized_entropy(tip_hist)
+        th1_feat = _normalized_entropy(th1_hist)
+        th2_feat = _normalized_entropy(th2_hist)
+        joint = th1_feat * th2_feat
+
+    elif formula == 'coverage_dispersion':
+        # coverage × (1-R) - hybrid of both signals
+        tip_cov = _coverage_from_angles(tip_angles, n_bins)
+        tip_disp = _dispersion_from_angles(tip_angles)
+        tip_feat = tip_cov * tip_disp
+
+        th1_cov = _coverage_from_angles(th1, n_bins)
+        th1_disp = _dispersion_from_angles(th1)
+        th1_feat = th1_cov * th1_disp
+
+        th2_cov = _coverage_from_angles(th2, n_bins)
+        th2_disp = _dispersion_from_angles(th2)
+        th2_feat = th2_cov * th2_disp
+
+        joint = th1_feat * th2_feat
+
+    else:
+        raise ValueError(f"Unknown caustic formula: {formula}. "
+                        f"Use 'legacy', 'coverage', 'dispersion', 'entropy', or 'coverage_dispersion'")
+
+    return np.stack([tip_feat, th1_feat, th2_feat, joint], axis=1)
 
 
 def temporal_derivatives(features: np.ndarray, order: int = 1) -> np.ndarray:
@@ -553,7 +658,9 @@ class FeatureConfig:
     include_velocity: bool = True
     include_caustic: bool = False  # caustic/angular distribution features
     caustic_bins: int = 36  # number of angular bins (36 = 10° bins)
-    # Specific caustic features to include (if include_caustic=True)
+    # Formula for caustic features: 'legacy' (9 features), 'coverage', 'dispersion', 'entropy', 'coverage_dispersion' (4 features each)
+    caustic_formula: str = 'legacy'
+    # Specific caustic features to include (if include_caustic=True and formula='legacy')
     # None = all features, or specify subset like ['joint_concentration']
     caustic_subset: tuple[str, ...] | None = None
     include_derivatives: bool = True
@@ -608,11 +715,20 @@ FEATURE_GROUPS = {
     'tip_spread': ['tip_area', 'tip_max_dist', 'tip_mean_dist'],
     'angular_spread': ['th1_spread', 'th2_spread', 'th1_cstd', 'th2_cstd'],
     'velocity': ['var_w1', 'var_w2', 'mean_abs_w1', 'mean_abs_w2', 'range_abs_w1', 'range_abs_w2'],
+    # Legacy caustic features (9 total)
     'caustic': [
         'angular_causticness', 'tip_causticness', 'joint_concentration', 'organization_causticness',
         'th1_causticness', 'th2_causticness',
-        'tip_coverage', 'th1_coverage', 'th2_coverage',  # NEW: coverage-only features
+        'tip_coverage', 'th1_coverage', 'th2_coverage',
     ],
+}
+
+# Caustic feature names for non-legacy formulas (4 features each)
+CAUSTIC_FORMULA_NAMES = {
+    'coverage': ['cov_tip', 'cov_th1', 'cov_th2', 'cov_joint'],
+    'dispersion': ['disp_tip', 'disp_th1', 'disp_th2', 'disp_joint'],
+    'entropy': ['ent_tip', 'ent_th1', 'ent_th2', 'ent_joint'],
+    'coverage_dispersion': ['covdisp_tip', 'covdisp_th1', 'covdisp_th2', 'covdisp_joint'],
 }
 
 
@@ -664,14 +780,18 @@ class FeatureExtractor:
         for group in base_groups:
             names.extend(FEATURE_GROUPS[group])
 
-        # Handle caustic features with optional subset
+        # Handle caustic features with optional subset/formula
         if cfg.include_caustic:
-            if cfg.caustic_subset is not None:
-                # Only include specified caustic features
-                names.extend(list(cfg.caustic_subset))
+            if cfg.caustic_formula == 'legacy':
+                if cfg.caustic_subset is not None:
+                    # Only include specified caustic features
+                    names.extend(list(cfg.caustic_subset))
+                else:
+                    # Include all legacy caustic features (9)
+                    names.extend(FEATURE_GROUPS['caustic'])
             else:
-                # Include all caustic features
-                names.extend(FEATURE_GROUPS['caustic'])
+                # Use formula-specific names (4 features)
+                names.extend(CAUSTIC_FORMULA_NAMES[cfg.caustic_formula])
 
         if cfg.include_derivatives:
             base_names = names.copy()
@@ -743,9 +863,9 @@ class FeatureExtractor:
         if cfg.include_velocity:
             features_list.append(velocity_features(data))
         if cfg.include_caustic:
-            all_caustic = caustic_features(data, cfg.caustic_bins)
-            if cfg.caustic_subset is not None:
-                # Only keep specified caustic features
+            all_caustic = caustic_features(data, cfg.caustic_bins, cfg.caustic_formula)
+            if cfg.caustic_subset is not None and cfg.caustic_formula == 'legacy':
+                # Only keep specified caustic features (only works with legacy formula)
                 all_caustic_names = FEATURE_GROUPS['caustic']
                 indices = [all_caustic_names.index(n) for n in cfg.caustic_subset]
                 features_list.append(all_caustic[:, indices])
@@ -960,6 +1080,7 @@ class FeatureCache:
         dataset: 'Dataset',
         verbose: bool = True,
         n_jobs: int | None = None,
+        auto_release: bool = False,
     ) -> None:
         """
         Extract and cache features for all simulations in a dataset.
@@ -967,10 +1088,16 @@ class FeatureCache:
         If cache_dir was specified, features are loaded from disk if available,
         and newly extracted features are saved to disk.
 
+        IMPORTANT: Raw simulation data uses ~35GB for 90 simulations. Use
+        auto_release=True or call dataset.release_simulation_data() after
+        extraction to free this memory.
+
         Args:
             dataset: Dataset object with loaded simulations
             verbose: Print progress
-            n_jobs: Number of parallel workers (None = number of CPUs)
+            n_jobs: Number of parallel workers (None = min(4, CPUs) to limit memory)
+            auto_release: If True, call dataset.release_simulation_data() after
+                extraction to free ~35GB of memory. Recommended for most use cases.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
@@ -1005,7 +1132,9 @@ class FeatureCache:
 
         total = len(to_process)
         if n_jobs is None:
-            n_jobs = min(os.cpu_count() or 1, total)
+            # Cap at 4 workers by default to prevent memory spikes
+            # Each worker holds simulation data (~400MB) in memory during extraction
+            n_jobs = min(4, os.cpu_count() or 1, total)
 
         logger.info("Extracting features for {} simulations using {} workers...", total, n_jobs)
         start_time = time.time()
@@ -1044,6 +1173,10 @@ class FeatureCache:
         elapsed = time.time() - start_time
         logger.info("Feature extraction complete: {} simulations in {:.1f}s ({:.2f}s/sim)",
                    len(self._cache), elapsed, elapsed / total if total > 0 else 0)
+
+        if auto_release:
+            dataset.release_simulation_data()
+            logger.info("Released raw simulation data to free memory (~35GB)")
 
     def extract_single(self, sim_id: str, simulation: 'Simulation') -> np.ndarray:
         """Extract and cache features for a single simulation."""

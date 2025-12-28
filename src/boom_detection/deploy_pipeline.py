@@ -70,6 +70,7 @@ class BoomDetectionPipeline:
         n_quality_features: int = 50,  # Top correlated features
         seed: int | None = None,  # Random seed for reproducibility
         calibrate_quality: bool = True,  # Calibrate quality predictions
+        hgb_feature_subset: tuple[str, ...] | None = None,  # Feature names for HGB (None = use all)
     ):
         self.accept_threshold = accept_threshold
         self.agreement_weight = agreement_weight
@@ -84,6 +85,7 @@ class BoomDetectionPipeline:
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
+        self.hgb_feature_subset = hgb_feature_subset
 
         # Models (set during training)
         self.cnn = None
@@ -92,6 +94,7 @@ class BoomDetectionPipeline:
         self.quality_model = None
         self.quality_calibrator = None  # Optional isotonic regression calibrator
         self.quality_feature_indices = None  # Top features for quality
+        self.hgb_feature_indices = None  # Indices for HGB feature subset
         self.n_features = None
 
     def set_seed(self, seed: int) -> None:
@@ -136,9 +139,21 @@ class BoomDetectionPipeline:
 
         # Train HistGBM
         logger.debug("Training HistGBM...")
+
+        # Resolve HGB feature subset to indices
+        if self.hgb_feature_subset is not None:
+            self.hgb_feature_indices = [cache.index(name) for name in self.hgb_feature_subset]
+            logger.debug("Using {} features for HGB: {}", len(self.hgb_feature_indices),
+                        self.hgb_feature_subset[:5])
+        else:
+            self.hgb_feature_indices = None  # Use all features
+
         X_train, y_train = [], []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
+            # Apply feature selection if specified
+            if self.hgb_feature_indices is not None:
+                feats = feats[:, self.hgb_feature_indices]
             for t in range(len(feats)):
                 X_train.append(feats[t])
                 y_train.append(1 if t >= boom else 0)
@@ -260,8 +275,11 @@ class BoomDetectionPipeline:
         crossings = np.where(probs_cnn >= 0.5)[0]
         cnn_pred = int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs_cnn))
 
-        # HGB prediction
-        probs_hgb = self.hgb.predict_proba(features)[:, 1]
+        # HGB prediction (with optional feature selection)
+        hgb_features = features
+        if self.hgb_feature_indices is not None:
+            hgb_features = features[:, self.hgb_feature_indices]
+        probs_hgb = self.hgb.predict_proba(hgb_features)[:, 1]
         crossings = np.where(probs_hgb >= 0.5)[0]
         hgb_pred = int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs_hgb))
 
@@ -367,6 +385,8 @@ class BoomDetectionPipeline:
             'n_features': self.n_features,
             'quality_feature_indices': self.quality_feature_indices,
             'calibrate_quality': self.calibrate_quality,
+            'hgb_feature_subset': list(self.hgb_feature_subset) if self.hgb_feature_subset else None,
+            'hgb_feature_indices': self.hgb_feature_indices,
         }
         with open(path / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -393,6 +413,7 @@ class BoomDetectionPipeline:
             config = json.load(f)
 
         # Create pipeline with saved config
+        hgb_subset = config.get('hgb_feature_subset')
         pipeline = cls(
             accept_threshold=config.get('accept_threshold', 0.60),
             agreement_weight=config.get('agreement_weight', 0.4),
@@ -402,10 +423,12 @@ class BoomDetectionPipeline:
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
+            hgb_feature_subset=tuple(hgb_subset) if hgb_subset else None,
         )
 
         pipeline.n_features = config['n_features']
         pipeline.quality_feature_indices = config['quality_feature_indices']
+        pipeline.hgb_feature_indices = config.get('hgb_feature_indices')
 
         # Load CNN with exact saved architecture
         checkpoint = torch.load(path / 'cnn.pt', map_location='cpu', weights_only=True)

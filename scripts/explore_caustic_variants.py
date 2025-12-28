@@ -120,6 +120,8 @@ def main():
     print(f"Seeds: {seeds}")
     print()
 
+    import gc
+
     # Load dataset
     print("Loading dataset...")
     dataset = load_dataset(args.data_path, verbose=False)
@@ -127,6 +129,7 @@ def main():
     print()
 
     results = []
+    # Note: This script creates multiple in-memory caches, each needs raw data
 
     # =========================================================================
     # Variant 1: No caustic features at all (minimal baseline)
@@ -145,6 +148,7 @@ def main():
 
     # Get feature names for this config
     baseline_features = config.feature_names()
+    del cache; gc.collect()
 
     # =========================================================================
     # Variant 2: Current full caustic (9 features)
@@ -235,6 +239,10 @@ def main():
     print("\nCaustic features ranked by importance:")
     for name, imp in caustic_importances:
         print(f"  {name:<30} {imp:.4f}")
+
+    # Release raw data - no longer needed
+    dataset.release_simulation_data()
+    del cache; gc.collect()
 
     # =========================================================================
     # Summary

@@ -33,5 +33,28 @@ logger.add(
     colorize=True,
 )
 
+# Memory monitoring utility
+def log_memory_usage(label: str = "") -> float:
+    """
+    Log current memory usage and return it in GB.
+
+    Useful for debugging memory issues. Call at key points:
+        log_memory_usage("after loading dataset")
+        log_memory_usage("after feature extraction")
+        log_memory_usage("after releasing simulation data")
+
+    Args:
+        label: Optional label to identify the measurement point
+
+    Returns:
+        Current memory usage in GB
+    """
+    import psutil
+    mem_gb = psutil.Process(os.getpid()).memory_info().rss / 1e9
+    label_str = f" ({label})" if label else ""
+    logger.info("Memory usage{}: {:.2f} GB", label_str, mem_gb)
+    return mem_gb
+
+
 # Export logger for use in other modules
-__all__ = ["logger"]
+__all__ = ["logger", "log_memory_usage"]
