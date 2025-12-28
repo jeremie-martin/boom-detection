@@ -3,21 +3,21 @@ Deployable boom detection pipeline.
 
 This implements the best-performing approach:
 1. Run CNN and HistGBM in parallel
-2. Check if they agree (within threshold)
-3. Predict quality using features around predicted boom
-4. If both filters pass → use CNN prediction (more accurate than HGB)
+2. Compute accept_score from model agreement and predicted quality
+3. Accept if accept_score >= threshold
+4. Use CNN prediction for accepted samples (more accurate than HGB)
 
 Performance (5-fold CV × 5 seeds):
 - MAE: 6.5 ± 0.3 frames (on accepted simulations)
-- Acceptance rate: ~33%
+- Coverage: ~33%
 - Within 5 frames: ~60%
 
-Key improvements from ablation/tuning:
+Key features:
+- Single accept_score threshold instead of separate agreement/quality thresholds
 - CNN prediction (not HGB) - more accurate when models agree
 - Random Forest for quality (not Ridge) - better correlation
 - Top 50 quality features with smaller window (±25) - less overfitting
 - Larger CNN kernels (5,11,21) - capture longer-range patterns
-- hidden_dim=64 - more capacity without overfitting
 
 Usage:
     # Evaluate with robust multi-seed CV
@@ -25,6 +25,9 @@ Usage:
 
     # Quick single-seed evaluation (for development)
     uv run python -m boom_detection.deploy_pipeline data --evaluate --quick
+
+    # Custom accept threshold (lower = more samples accepted)
+    uv run python -m boom_detection.deploy_pipeline data --evaluate --accept-threshold 0.45
 
     # Train final models and save
     uv run python -m boom_detection.deploy_pipeline data --train --output models/
@@ -51,23 +54,42 @@ class BoomDetectionPipeline:
     Production-ready boom detection pipeline.
 
     Uses model agreement + predicted quality as confidence filters.
+    The accept_score combines these signals into a single scalar for thresholding.
     """
 
     def __init__(
         self,
-        agreement_threshold: int = 5,
-        quality_threshold: float = 0.55,
+        accept_threshold: float = 0.5,  # Threshold on accept_score
+        agreement_weight: float = 0.4,  # Weight for agreement in accept_score
+        quality_weight: float = 0.6,  # Weight for quality in accept_score
         quality_window: int = 25,  # Smaller window works better
         n_quality_features: int = 50,  # Top correlated features
         seed: int | None = None,  # Random seed for reproducibility
         calibrate_quality: bool = True,  # Calibrate quality predictions
+        # Legacy parameters for backward compatibility
+        agreement_threshold: int | None = None,
+        quality_threshold: float | None = None,
     ):
-        self.agreement_threshold = agreement_threshold
-        self.quality_threshold = quality_threshold
+        self.accept_threshold = accept_threshold
+        self.agreement_weight = agreement_weight
+        self.quality_weight = quality_weight
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
+
+        # If legacy thresholds provided, compute equivalent accept_threshold
+        # This maintains backward compatibility with old configs
+        if agreement_threshold is not None and quality_threshold is not None:
+            # Convert old thresholds to approximate accept_threshold
+            # agreement_threshold=5 -> agreement_score = 1 - 5/10 = 0.5
+            # quality_threshold=0.55 -> quality_score = 0.55
+            # accept_score = 0.4 * 0.5 + 0.6 * 0.55 = 0.53
+            agreement_score = 1.0 - min(agreement_threshold / 10.0, 1.0)
+            self.accept_threshold = (
+                self.agreement_weight * agreement_score +
+                self.quality_weight * quality_threshold
+            )
 
         # Models (set during training)
         self.cnn = None
@@ -255,16 +277,18 @@ class BoomDetectionPipeline:
         else:
             predicted_quality = float(np.clip(raw_quality, 0, 1))
 
-        # Apply filters
-        accepted = (
-            disagreement <= self.agreement_threshold and
-            predicted_quality >= self.quality_threshold
+        # Compute accept_score: single scalar combining agreement and quality
+        # agreement_score: 1.0 = perfect agreement, 0.0 = disagreement >= 10 frames
+        agreement_score = 1.0 - min(disagreement / 10.0, 1.0)
+
+        # Weighted combination (weights sum to 1.0)
+        accept_score = (
+            self.agreement_weight * agreement_score +
+            self.quality_weight * predicted_quality
         )
 
-        # Compute confidence score (higher = more confident)
-        # Normalize disagreement to [0, 1] and combine with quality
-        agreement_score = 1.0 - min(disagreement / 10.0, 1.0)  # 0-10 frames -> 1-0
-        confidence = (agreement_score + predicted_quality) / 2.0
+        # Accept if score exceeds threshold
+        accepted = accept_score >= self.accept_threshold
 
         return SelectivePrediction(
             boom_frame=cnn_pred if accepted else None,  # CNN is more accurate
@@ -273,7 +297,8 @@ class BoomDetectionPipeline:
             hgb_pred=hgb_pred,
             disagreement=disagreement,
             predicted_quality=predicted_quality,
-            confidence=confidence,
+            accept_score=accept_score,
+            confidence=accept_score,  # Deprecated alias
         )
 
     def predict(self, sim_ids: list[str], cache: FeatureCache) -> list[SelectivePrediction]:
@@ -319,8 +344,9 @@ class BoomDetectionPipeline:
 
         # Save config
         config = {
-            'agreement_threshold': self.agreement_threshold,
-            'quality_threshold': self.quality_threshold,
+            'accept_threshold': self.accept_threshold,
+            'agreement_weight': self.agreement_weight,
+            'quality_weight': self.quality_weight,
             'quality_window': self.quality_window,
             'n_quality_features': self.n_quality_features,
             'n_features': self.n_features,
@@ -351,13 +377,17 @@ class BoomDetectionPipeline:
         with open(path / 'config.json') as f:
             config = json.load(f)
 
-        # Create pipeline with saved config
+        # Create pipeline with saved config (handle both old and new formats)
         pipeline = cls(
-            agreement_threshold=config['agreement_threshold'],
-            quality_threshold=config['quality_threshold'],
+            accept_threshold=config.get('accept_threshold', 0.5),
+            agreement_weight=config.get('agreement_weight', 0.4),
+            quality_weight=config.get('quality_weight', 0.6),
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
+            # Legacy support: convert old thresholds if present
+            agreement_threshold=config.get('agreement_threshold'),
+            quality_threshold=config.get('quality_threshold'),
         )
 
         pipeline.n_features = config['n_features']
@@ -401,8 +431,9 @@ def cross_validate(
     cache: FeatureCache,
     n_splits: int = 5,
     seeds: list[int] | None = None,
-    agreement_threshold: int = 5,
-    quality_threshold: float = 0.55,
+    accept_threshold: float = 0.53,  # Equivalent to agreement=5, quality=0.55
+    agreement_weight: float = 0.4,
+    quality_weight: float = 0.6,
     verbose: bool = True,
 ) -> dict:
     """
@@ -414,7 +445,7 @@ def cross_validate(
     For new code, prefer using CachedEvaluator directly:
         evaluator = CachedEvaluator(dataset, cache)
         result = evaluator.cross_validate_selective(
-            lambda: BoomDetectionPipeline(agreement_threshold=5),
+            lambda: BoomDetectionPipeline(accept_threshold=0.53),
         )
 
     Args:
@@ -424,8 +455,9 @@ def cross_validate(
         cache: FeatureCache with extracted features
         n_splits: Number of CV folds
         seeds: Random seeds (default: 5 seeds for robust evaluation)
-        agreement_threshold: Max allowed disagreement between CNN and HGB
-        quality_threshold: Min predicted quality to accept
+        accept_threshold: Threshold on accept_score (0-1)
+        agreement_weight: Weight for model agreement in accept_score
+        quality_weight: Weight for predicted quality in accept_score
         verbose: Print progress
 
     Returns:
@@ -458,8 +490,9 @@ def cross_validate(
     # Use the unified evaluator
     result: MultiSeedSelectiveResult = evaluator.cross_validate_selective(
         lambda: BoomDetectionPipeline(
-            agreement_threshold=agreement_threshold,
-            quality_threshold=quality_threshold,
+            accept_threshold=accept_threshold,
+            agreement_weight=agreement_weight,
+            quality_weight=quality_weight,
         ),
         k=n_splits,
         seeds=seeds,
@@ -481,8 +514,9 @@ def cross_validate(
         # Per-seed results for analysis
         'seed_metrics': result.seed_metrics,
         # Config
-        'agreement_threshold': agreement_threshold,
-        'quality_threshold': quality_threshold,
+        'accept_threshold': accept_threshold,
+        'agreement_weight': agreement_weight,
+        'quality_weight': quality_weight,
         # Also expose the full result object for new code
         '_result': result,
     }
@@ -495,8 +529,8 @@ def main():
     parser.add_argument('--quick', action='store_true', help='Quick single-seed evaluation')
     parser.add_argument('--train', action='store_true', help='Train and save models')
     parser.add_argument('--output', type=Path, help='Output directory for models')
-    parser.add_argument('--agreement', type=int, default=5, help='Agreement threshold')
-    parser.add_argument('--quality', type=float, default=0.55, help='Quality threshold')
+    parser.add_argument('--accept-threshold', type=float, default=0.53,
+                        help='Accept score threshold (0-1, default 0.53)')
     parser.add_argument('--production', action='store_true',
                         help='Use PRODUCTION_CONFIG with caustic features (recommended)')
     parser.add_argument('--save-run', type=Path, default=None,
@@ -529,14 +563,12 @@ def main():
         mode = "quick (1 seed)" if args.quick else "robust (5 seeds)"
 
         print(f"\nRunning {mode} 5-fold cross-validation...")
-        print(f"Agreement threshold: {args.agreement}")
-        print(f"Quality threshold: {args.quality}")
+        print(f"Accept threshold: {args.accept_threshold}")
 
         results = cross_validate(
             sim_ids, boom_frames, qualities, cache,
             seeds=seeds,
-            agreement_threshold=args.agreement,
-            quality_threshold=args.quality,
+            accept_threshold=args.accept_threshold,
         )
 
         print()
@@ -582,8 +614,7 @@ def main():
 
             # Create config dict
             run_config = {
-                'agreement_threshold': args.agreement,
-                'quality_threshold': args.quality,
+                'accept_threshold': args.accept_threshold,
                 'production_features': args.production,
                 'n_splits': results['n_splits'],
                 'seeds': results['seeds'],
@@ -641,8 +672,7 @@ def main():
 
         print("\nTraining final models...")
         pipeline = BoomDetectionPipeline(
-            agreement_threshold=args.agreement,
-            quality_threshold=args.quality,
+            accept_threshold=args.accept_threshold,
         )
         pipeline.fit(sim_ids, boom_frames, qualities, cache)
 

@@ -27,6 +27,10 @@ from .metrics import (
     median_ae,
     rmse,
     RunArtifact,
+    # Decision-centric metrics
+    coverage_at_max_mae,
+    min_mae_at_coverage,
+    find_optimal_threshold,
 )
 
 __all__ = [
@@ -50,6 +54,10 @@ __all__ = [
     "median_ae",
     "rmse",
     "RunArtifact",
+    # Decision-centric metrics
+    "coverage_at_max_mae",
+    "min_mae_at_coverage",
+    "find_optimal_threshold",
 ]
 
 # =============================================================================

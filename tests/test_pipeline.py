@@ -61,21 +61,24 @@ class TestPipelineConfig:
     def test_default_thresholds(self):
         """Default thresholds should match documented values."""
         pipeline = BoomDetectionPipeline()
-        assert pipeline.agreement_threshold == 5
-        assert pipeline.quality_threshold == 0.55
+        assert pipeline.accept_threshold == 0.5
+        assert pipeline.agreement_weight == 0.4
+        assert pipeline.quality_weight == 0.6
         assert pipeline.quality_window == 25
         assert pipeline.n_quality_features == 50
 
     def test_custom_thresholds(self):
         """Custom thresholds should be stored correctly."""
         pipeline = BoomDetectionPipeline(
-            agreement_threshold=3,
-            quality_threshold=0.7,
+            accept_threshold=0.6,
+            agreement_weight=0.3,
+            quality_weight=0.7,
             quality_window=30,
             n_quality_features=100,
         )
-        assert pipeline.agreement_threshold == 3
-        assert pipeline.quality_threshold == 0.7
+        assert pipeline.accept_threshold == 0.6
+        assert pipeline.agreement_weight == 0.3
+        assert pipeline.quality_weight == 0.7
         assert pipeline.quality_window == 30
         assert pipeline.n_quality_features == 100
 

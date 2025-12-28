@@ -28,6 +28,16 @@ class SelectivePrediction:
 
     This is the canonical format for selective (abstaining) predictors.
     Use this to ensure consistent handling across the codebase.
+
+    Attributes:
+        boom_frame: Predicted boom frame (None if rejected)
+        accepted: Whether the prediction was accepted
+        cnn_pred: CNN model prediction
+        hgb_pred: HistGBM model prediction
+        disagreement: Absolute difference between CNN and HGB predictions
+        predicted_quality: Predicted quality score (0-1)
+        accept_score: Single scalar combining all confidence signals (higher = more confident)
+        confidence: Deprecated, use accept_score instead
     """
     boom_frame: int | None  # None if rejected
     accepted: bool
@@ -35,7 +45,8 @@ class SelectivePrediction:
     hgb_pred: int
     disagreement: int
     predicted_quality: float
-    confidence: float | None = None  # Optional confidence score
+    accept_score: float | None = None  # Single scalar combining confidence signals
+    confidence: float | None = None  # Deprecated - use accept_score
 
     @classmethod
     def from_dict(cls, d: dict) -> 'SelectivePrediction':
@@ -47,6 +58,7 @@ class SelectivePrediction:
             hgb_pred=d['hgb_pred'],
             disagreement=d['disagreement'],
             predicted_quality=d['predicted_quality'],
+            accept_score=d.get('accept_score'),
             confidence=d.get('confidence'),
         )
 
@@ -60,6 +72,8 @@ class SelectivePrediction:
             'disagreement': self.disagreement,
             'predicted_quality': self.predicted_quality,
         }
+        if self.accept_score is not None:
+            d['accept_score'] = self.accept_score
         if self.confidence is not None:
             d['confidence'] = self.confidence
         return d
@@ -212,7 +226,7 @@ def compute_selective_metrics(
 def compute_risk_coverage_curve(
     predictions: list[SelectivePrediction],
     true_booms: np.ndarray,
-    confidence_key: str = 'confidence',
+    score_key: str = 'accept_score',
 ) -> dict[str, Any]:
     """
     Compute risk-coverage curve for selective predictions.
@@ -223,7 +237,7 @@ def compute_risk_coverage_curve(
     Args:
         predictions: List of SelectivePrediction objects with confidence scores
         true_booms: Ground truth boom frames
-        confidence_key: Which field to use as confidence ('confidence' or 'predicted_quality')
+        score_key: Which field to use for ranking ('accept_score', 'confidence', or 'predicted_quality')
 
     Returns:
         Dictionary with:
@@ -245,8 +259,10 @@ def compute_risk_coverage_curve(
     confidences = []
     errors = []
     for i, pred in enumerate(predictions):
-        # Get confidence score
-        if confidence_key == 'confidence' and pred.confidence is not None:
+        # Get confidence score (prefer accept_score, fall back to others)
+        if score_key == 'accept_score' and pred.accept_score is not None:
+            conf = pred.accept_score
+        elif score_key == 'confidence' and pred.confidence is not None:
             conf = pred.confidence
         else:
             conf = pred.predicted_quality
@@ -317,6 +333,201 @@ def compute_selective_metrics_with_rc(
     metrics['_risk_coverage_curve'] = rc
 
     return metrics
+
+
+# =============================================================================
+# Decision-Centric Metrics (for threshold tuning)
+# =============================================================================
+
+def coverage_at_max_mae(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    max_mae: float,
+    score_key: str = 'accept_score',
+) -> float:
+    """
+    Find maximum achievable coverage while keeping MAE <= max_mae.
+
+    This answers: "What fraction can we accept if we require MAE ≤ X frames?"
+
+    Args:
+        predictions: Selective predictions with accept scores
+        true_booms: Ground truth boom frames
+        max_mae: Maximum acceptable MAE
+        score_key: Field to use for ranking ('accept_score' or 'predicted_quality')
+
+    Returns:
+        Maximum coverage (0-1) that achieves the MAE target
+    """
+    n = len(predictions)
+    if n == 0:
+        return 0.0
+
+    # Get scores and errors
+    scores = []
+    errors = []
+    for i, pred in enumerate(predictions):
+        if score_key == 'accept_score' and pred.accept_score is not None:
+            score = pred.accept_score
+        else:
+            score = pred.predicted_quality
+        error = abs(pred.cnn_pred - true_booms[i])
+        scores.append(score)
+        errors.append(error)
+
+    scores = np.array(scores)
+    errors = np.array(errors)
+
+    # Sort by score (highest first)
+    order = np.argsort(-scores)
+    sorted_errors = errors[order]
+
+    # Find maximum k where MAE of top-k <= max_mae
+    best_k = 0
+    for k in range(1, n + 1):
+        if np.mean(sorted_errors[:k]) <= max_mae:
+            best_k = k
+        else:
+            break  # Once we exceed, we can't recover
+
+    return best_k / n
+
+
+def min_mae_at_coverage(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    target_coverage: float,
+    score_key: str = 'accept_score',
+) -> float:
+    """
+    Find minimum achievable MAE while accepting at least target_coverage.
+
+    This answers: "What's the best accuracy if we must accept at least X%?"
+
+    Args:
+        predictions: Selective predictions with accept scores
+        true_booms: Ground truth boom frames
+        target_coverage: Minimum required coverage (0-1)
+        score_key: Field to use for ranking ('accept_score' or 'predicted_quality')
+
+    Returns:
+        Minimum MAE achievable at the target coverage
+    """
+    n = len(predictions)
+    if n == 0:
+        return float('nan')
+
+    # Get scores and errors
+    scores = []
+    errors = []
+    for i, pred in enumerate(predictions):
+        if score_key == 'accept_score' and pred.accept_score is not None:
+            score = pred.accept_score
+        else:
+            score = pred.predicted_quality
+        error = abs(pred.cnn_pred - true_booms[i])
+        scores.append(score)
+        errors.append(error)
+
+    scores = np.array(scores)
+    errors = np.array(errors)
+
+    # Sort by score (highest first)
+    order = np.argsort(-scores)
+    sorted_errors = errors[order]
+
+    # How many samples must we accept to reach target_coverage?
+    k = max(1, int(np.ceil(target_coverage * n)))
+    k = min(k, n)  # Don't exceed total samples
+
+    return float(np.mean(sorted_errors[:k]))
+
+
+def find_optimal_threshold(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    target_mae: float | None = None,
+    target_coverage: float | None = None,
+    score_key: str = 'accept_score',
+) -> dict[str, float]:
+    """
+    Find optimal accept_score threshold for a given target.
+
+    Either target_mae or target_coverage should be specified, not both.
+
+    Args:
+        predictions: Selective predictions with accept scores
+        true_booms: Ground truth boom frames
+        target_mae: Target maximum MAE (find threshold to achieve this)
+        target_coverage: Target minimum coverage (find threshold to achieve this)
+        score_key: Field to use ('accept_score' or 'predicted_quality')
+
+    Returns:
+        Dict with 'threshold', 'coverage', 'mae', and 'n_accepted'
+    """
+    n = len(predictions)
+    if n == 0:
+        return {'threshold': 0.0, 'coverage': 0.0, 'mae': float('nan'), 'n_accepted': 0}
+
+    # Get scores and errors
+    scores = []
+    errors = []
+    for i, pred in enumerate(predictions):
+        if score_key == 'accept_score' and pred.accept_score is not None:
+            score = pred.accept_score
+        else:
+            score = pred.predicted_quality
+        error = abs(pred.cnn_pred - true_booms[i])
+        scores.append(score)
+        errors.append(error)
+
+    scores = np.array(scores)
+    errors = np.array(errors)
+
+    # Sort by score (highest first)
+    order = np.argsort(-scores)
+    sorted_scores = scores[order]
+    sorted_errors = errors[order]
+
+    if target_mae is not None:
+        # Find threshold that gives MAE <= target_mae
+        best_k = 0
+        for k in range(1, n + 1):
+            if np.mean(sorted_errors[:k]) <= target_mae:
+                best_k = k
+
+        if best_k == 0:
+            # Can't achieve target even at lowest coverage
+            return {
+                'threshold': float(sorted_scores[0]) + 0.01,
+                'coverage': 0.0,
+                'mae': float('nan'),
+                'n_accepted': 0,
+            }
+
+        threshold = float(sorted_scores[best_k - 1]) - 0.001
+        return {
+            'threshold': threshold,
+            'coverage': best_k / n,
+            'mae': float(np.mean(sorted_errors[:best_k])),
+            'n_accepted': best_k,
+        }
+
+    elif target_coverage is not None:
+        # Find threshold that gives at least target_coverage
+        k = max(1, int(np.ceil(target_coverage * n)))
+        k = min(k, n)
+
+        threshold = float(sorted_scores[k - 1]) - 0.001
+        return {
+            'threshold': threshold,
+            'coverage': k / n,
+            'mae': float(np.mean(sorted_errors[:k])),
+            'n_accepted': k,
+        }
+
+    else:
+        raise ValueError("Either target_mae or target_coverage must be specified")
 
 
 # =============================================================================
