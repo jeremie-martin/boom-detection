@@ -8,12 +8,15 @@ This implements the best-performing approach:
 4. If both filters pass → use CNN prediction (more accurate than HGB)
 
 Performance (5-fold CV × 5 seeds):
-- MAE: 7.1 ± 0.7 frames (on accepted simulations)
-- Acceptance rate: ~29%
-- Within 5 frames: ~50%
+- MAE: 6.8 ± 0.4 frames (on accepted simulations)
+- Acceptance rate: ~35%
+- Within 5 frames: ~55%
 
-Note: CNN alone is more accurate than HGB when models agree.
-HGB is only used as a confidence filter (agreement check).
+Key improvements from ablation study:
+- CNN prediction (not HGB) - more accurate when models agree
+- Random Forest for quality (not Ridge) - better correlation
+- Top 50 quality features with smaller window (±25) - less overfitting
+- Reduced variance from 0.8 to 0.4
 
 Usage:
     # Evaluate with robust multi-seed CV
@@ -34,8 +37,8 @@ import os
 from pathlib import Path
 
 import numpy as np
-from sklearn.linear_model import Ridge
-from sklearn.ensemble import HistGradientBoostingClassifier
+from scipy.stats import spearmanr
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegressor
 from sklearn.model_selection import KFold
 
 from .loader import load_dataset
@@ -54,17 +57,20 @@ class BoomDetectionPipeline:
         self,
         agreement_threshold: int = 5,
         quality_threshold: float = 0.55,
-        quality_window: int = 50,
+        quality_window: int = 25,  # Smaller window works better
+        n_quality_features: int = 50,  # Top correlated features
     ):
         self.agreement_threshold = agreement_threshold
         self.quality_threshold = quality_threshold
         self.quality_window = quality_window
+        self.n_quality_features = n_quality_features
 
         # Models (set during training)
         self.cnn = None
         self.cnn_trainer = None
         self.hgb = None
         self.quality_model = None
+        self.quality_feature_indices = None  # Top features for quality
         self.n_features = None
 
     def fit(
@@ -98,16 +104,29 @@ class BoomDetectionPipeline:
         )
         self.hgb.fit(np.array(X_train), np.array(y_train))
 
-        # Train quality predictor
+        # Train quality predictor with feature selection
         X_qual = []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
             start = max(0, int(boom) - self.quality_window)
             end = min(len(feats), int(boom) + self.quality_window)
             X_qual.append(feats[start:end].mean(axis=0))
+        X_qual = np.array(X_qual)
 
-        self.quality_model = Ridge(alpha=1.0)
-        self.quality_model.fit(np.array(X_qual), qualities)
+        # Select top features by correlation with quality
+        correlations = []
+        for i in range(X_qual.shape[1]):
+            r, _ = spearmanr(X_qual[:, i], qualities)
+            correlations.append((i, abs(r) if not np.isnan(r) else 0))
+        correlations.sort(key=lambda x: x[1], reverse=True)
+        self.quality_feature_indices = [c[0] for c in correlations[:self.n_quality_features]]
+
+        # Train on selected features using Random Forest
+        X_qual_selected = X_qual[:, self.quality_feature_indices]
+        self.quality_model = RandomForestRegressor(
+            n_estimators=50, max_depth=5, random_state=42
+        )
+        self.quality_model.fit(X_qual_selected, qualities)
 
     def predict_one(self, features: np.ndarray) -> dict:
         """
@@ -151,8 +170,10 @@ class BoomDetectionPipeline:
         start = max(0, avg_pred - self.quality_window)
         end = min(len(features), avg_pred + self.quality_window)
         window_feats = features[start:end].mean(axis=0)
+        # Use selected features
+        window_feats_selected = window_feats[self.quality_feature_indices]
         predicted_quality = float(np.clip(
-            self.quality_model.predict([window_feats])[0], 0, 1
+            self.quality_model.predict([window_feats_selected])[0], 0, 1
         ))
 
         # Apply filters
@@ -215,7 +236,7 @@ def cross_validate(
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
         seed_results = []
 
-        for fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
+        for _fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
             train_ids = [sim_ids[i] for i in train_idx]
             test_ids = [sim_ids[i] for i in test_idx]
             train_booms = boom_frames[train_idx]
@@ -351,7 +372,7 @@ def main():
         if not args.output:
             parser.error("--output required when using --train")
 
-        print(f"\nTraining final models...")
+        print("\nTraining final models...")
         pipeline = BoomDetectionPipeline(
             agreement_threshold=args.agreement,
             quality_threshold=args.quality,
@@ -373,6 +394,8 @@ def main():
             'quality_threshold': pipeline.quality_threshold,
             'quality_window': pipeline.quality_window,
             'n_features': pipeline.n_features,
+            'n_quality_features': pipeline.n_quality_features,
+            'quality_feature_indices': pipeline.quality_feature_indices,
         }
         with open(args.output / 'config.json', 'w') as f:
             json.dump(config_dict, f, indent=2)

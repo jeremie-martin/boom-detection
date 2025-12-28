@@ -1,6 +1,6 @@
 # Boom Detection: Results Summary
 
-## Best Result: MAE 7.5 ± 0.6 frames (Robust Evaluation)
+## Best Result: MAE 6.7 ± 0.6 frames (Robust Evaluation)
 
 The goal is producing **high-quality animations for YouTube/social media**, not detecting boom frames on all simulations. This means:
 - We only care about high-quality simulations
@@ -14,9 +14,10 @@ At inference:
 1. CNN → boom_cnn
 2. HistGBM → boom_hgb
 3. IF |boom_cnn - boom_hgb| ≤ 5:
-   4. Extract features around avg(boom_cnn, boom_hgb)
-   5. Predict quality
-   6. IF predicted_quality ≥ 0.55:
+   4. Extract features around avg(boom_cnn, boom_hgb) [±25 frames]
+   5. Select top 50 quality-correlated features
+   6. Predict quality using Random Forest
+   7. IF predicted_quality ≥ 0.55:
       → ACCEPT, use boom_cnn as final prediction
    ELSE:
       → REJECT
@@ -30,16 +31,18 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 
 | Metric | Mean ± Std |
 |--------|-----------|
-| MAE | **7.5 ± 0.6 frames** |
-| Within 5 frames | 59% ± 6% |
-| Acceptance rate | 31% ± 4% |
+| MAE | **6.7 ± 0.6 frames** |
+| Within 5 frames | 61% ± 3% |
+| Acceptance rate | 34% ± 3% |
 
-### Key Insights
+### Key Improvements
 
-1. **Model agreement is the primary filter** - when CNN and HistGBM disagree, predictions are unreliable
-2. **Use CNN prediction, not HGB** - CNN is more accurate when models agree (see ablation study)
-3. **Quality filter helps** - reduces MAE by ~2-3 frames but lowers acceptance
-4. **Low variance** - switching from HGB to CNN reduced std from 1.1 to 0.6
+| Change | MAE | Acceptance | Notes |
+|--------|-----|------------|-------|
+| Baseline (HGB prediction) | 7.2 ± 1.1 | 33% | Original pipeline |
+| + Use CNN prediction | 7.5 ± 0.6 | 31% | CNN more accurate |
+| + RF for quality | 6.8 ± 0.4 | 35% | Better quality prediction |
+| + Top 50 features, ±25 window | **6.7 ± 0.6** | **34%** | Less overfitting |
 
 ---
 
@@ -53,7 +56,7 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 | HGB | 11.0 ± 4.5 | High | 32% |
 | Average | 7.9 ± 2.6 | Medium | 32% |
 
-**Conclusion**: CNN is more accurate and has lower variance. Use CNN.
+**Conclusion**: CNN is more accurate and has lower variance.
 
 ### Impact of each filter
 
@@ -74,7 +77,60 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 | HGB | 18.8 ± 1.3 |
 | Ensemble | 17.6 ± 1.3 |
 
-**Conclusion**: CNN outperforms HGB on average. HGB's value is as a confidence check (agreement filter).
+**Conclusion**: CNN outperforms HGB on average. HGB's value is as a confidence check.
+
+---
+
+## Quality Prediction Analysis
+
+### Top features for quality (Spearman correlation)
+
+| Feature | Correlation | Description |
+|---------|-------------|-------------|
+| d1_std_th1 | +0.649 | 1st derivative std of theta1 |
+| d1_var_th1 | +0.569 | 1st derivative var of theta1 |
+| d1_var_x1 | +0.531 | 1st derivative var of x1 |
+| kurt_th1 | -0.469 | Kurtosis of theta1 |
+
+**Key insight**: Derivative features predict quality, but NOT boom timing. This suggests quality and timing use different signals.
+
+### Quality model comparison
+
+| Model | MAE | Spearman r |
+|-------|-----|------------|
+| Ridge (original) | 0.244 | 0.294 |
+| Lasso | 0.239 | 0.168 |
+| **Random Forest** | **0.176** | **0.454** |
+| HGB | 0.224 | -0.173 |
+
+**Best config**: Random Forest with top 50 features and ±25 frame window.
+
+---
+
+## Feature Importance for Boom Detection
+
+### Top features (Random Forest importance)
+
+| Feature | Importance | Description |
+|---------|------------|-------------|
+| std_th1 | 0.080 | Std of theta1 |
+| var_th1 | 0.080 | Variance of theta1 |
+| var_th2 | 0.079 | Variance of theta2 |
+| range_w2 | 0.057 | Range of omega2 |
+| tip_area | 0.056 | Convex hull area of tips |
+
+### Feature group importance
+
+| Group | Total Importance | # Features |
+|-------|-----------------|------------|
+| range | 0.31 | 10 |
+| var | 0.25 | 10 |
+| std | 0.16 | 8 |
+| iqr | 0.11 | 8 |
+| tip | 0.09 | 3 |
+| derivatives (d1, d2) | 0.02 | 122 |
+
+**Key insight**: Derivatives are NOT important for boom detection, but ARE important for quality. Variance and range features dominate boom detection.
 
 ---
 
@@ -109,29 +165,14 @@ When CNN and HistGBM agree within 5 frames:
 - MAE drops to 7-8
 - Strong correlation with quality
 
-### 3. Complementary Model Strengths
+### 3. Different Features for Different Tasks
 
-| Model | High-Q MAE | Low-Q MAE |
-|-------|-----------|-----------|
-| CNN | **8.4** | 24.9 |
-| HGB | 11.2 | **18.2** |
+| Task | Important Features |
+|------|-------------------|
+| Boom detection | var, std, range, tip |
+| Quality prediction | derivatives (d1_*) |
 
-CNN excels on high-quality, HGB on low-quality.
-
----
-
-## Feature Importance
-
-Top features for HistGBM (feature indices):
-- 1298, 662, 616, 1189, 28, 979, 657, 70
-
-Key finding: Top 20-50 features outperform all 1365 for HistGBM, but CNN benefits from all features.
-
-| Features | HistGBM MAE | CNN MAE |
-|----------|-------------|---------|
-| All 1365 | 18.9 | **15.7** |
-| Top 50 | **16.2** | 20.4 |
-| Top 20 | 17.1 | 20.2 |
+This suggests we should use specialized feature sets.
 
 ---
 
@@ -145,7 +186,8 @@ Key finding: Top 20-50 features outperform all 1365 for HistGBM, but CNN benefit
 | + Local context | 13.3 | Enhanced features |
 | + Agreement filter | ~10 | Accept when models agree |
 | + Quality filter | ~7 | Reject low predicted quality |
-| **+ Use CNN (ablation)** | **7.5 ± 0.6** | Final pipeline |
+| + Use CNN | 7.5 | CNN > HGB when agree |
+| **+ Improved quality model** | **6.7 ± 0.6** | RF, top 50, ±25 window |
 
 ---
 

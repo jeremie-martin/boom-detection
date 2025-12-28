@@ -2,17 +2,20 @@
 
 Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge into a caustic pattern.
 
-## Best Result: MAE 7.5 ± 0.6 frames
+## Best Result: MAE 6.7 ± 0.6 frames
 
 Using model agreement + predicted quality filtering (robust 5-seed evaluation):
 
 | Metric | Value |
 |--------|-------|
-| MAE | **7.5 ± 0.6 frames** |
-| Within 5 frames | 59% ± 6% |
-| Acceptance rate | 31% ± 4% |
+| MAE | **6.7 ± 0.6 frames** |
+| Within 5 frames | 61% ± 3% |
+| Acceptance rate | 34% ± 3% |
 
-**Key finding from ablation study:** CNN is more accurate than HGB when models agree. Switching to CNN also reduced variance significantly (from 1.1 to 0.6).
+**Key improvements from ablation study:**
+- CNN prediction (not HGB) - more accurate when models agree
+- Random Forest for quality (not Ridge) - better correlation
+- Top 50 quality features with smaller window (±25) - less overfitting
 
 ## Quick Start
 
@@ -33,11 +36,11 @@ The pipeline uses two models (CNN and HistGBM) as a confidence filter:
 
 1. **Run both models** on the simulation
 2. **Check agreement**: If predictions differ by >5 frames → reject
-3. **Predict quality**: Use features around predicted boom
+3. **Predict quality**: Random Forest on top 50 correlated features (±25 window)
 4. **Filter**: If predicted quality < 0.55 → reject
 5. **Accept**: Use CNN prediction (ablation study showed CNN > HGB)
 
-This achieves MAE 7.5 on ~31% of simulations. For video production, we simply generate more simulations and use only the accepted ones.
+This achieves MAE 6.7 on ~34% of simulations. For video production, we simply generate more simulations and use only the accepted ones.
 
 ## Project Structure
 
@@ -85,7 +88,8 @@ uv run python -m boom_detection.deploy_pipeline data --evaluate  # Best pipeline
 
 1. **Model agreement = confidence**: When CNN and HistGBM agree, predictions are reliable
 2. **Quality predicts error**: High-quality booms have MAE ~11, low-quality ~31
-3. **Rejection is OK**: For video production, we can generate more simulations
+3. **Different features for different tasks**: Derivatives predict quality; variance/range predict boom
 4. **CNN > HGB**: Ablation study showed CNN is more accurate when models agree
+5. **Feature selection matters**: Top 50 features with smaller window reduces overfitting
 
 See [docs/RESULTS.md](docs/RESULTS.md) for detailed analysis.
