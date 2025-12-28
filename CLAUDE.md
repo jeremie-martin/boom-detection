@@ -4,7 +4,9 @@
 
 Predict the "boom" frame in double pendulum simulations. See README.md for full context.
 
-**Current best**: CNN at MAE 14.3 frames (target: <5)
+**Current best**: CNN at MAE 17.1 frames (target: <5)
+
+**Key finding**: Boom quality strongly predicts error. High-quality booms have MAE ~11, low-quality ~31.
 
 ## What is the Boom?
 
@@ -57,6 +59,8 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 | `features.py` | Adding new features |
 | `frame_models.py` | Adding sklearn-based models |
 | `sequence_models.py` | Adding PyTorch models |
+| `quality_models.py` | Quality prediction models |
+| `pipeline.py` | Multi-stage quality-aware pipeline |
 | `convergence.py` | Convergence/bimodality detection (experimental) |
 | `changepoint.py` | CUSUM/BOCPD detectors |
 | `ensemble.py` | Model ensembling |

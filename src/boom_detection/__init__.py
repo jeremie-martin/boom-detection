@@ -79,6 +79,21 @@ from .convergence import (
     BimodalityDetector,
 )
 
+from .quality_models import (
+    MeanQualityPredictor,
+    MedianQualityPredictor,
+    QualityRegressor,
+    QualityClassifier,
+    BoomAwareQualityPredictor,
+    get_quality_predictors,
+)
+
+from .pipeline import (
+    QualityFilter,
+    QualityAwarePipeline,
+    ConditionalPipeline,
+)
+
 __all__ = [
     # Loader
     "Annotation",
@@ -141,4 +156,15 @@ __all__ = [
     "extract_convergence_features",
     "ConvergenceDetector",
     "BimodalityDetector",
+    # Quality models
+    "MeanQualityPredictor",
+    "MedianQualityPredictor",
+    "QualityRegressor",
+    "QualityClassifier",
+    "BoomAwareQualityPredictor",
+    "get_quality_predictors",
+    # Pipeline
+    "QualityFilter",
+    "QualityAwarePipeline",
+    "ConditionalPipeline",
 ]

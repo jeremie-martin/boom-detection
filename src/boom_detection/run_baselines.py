@@ -202,6 +202,8 @@ def quick_cv(
     data_path: str = 'data',
     k: int = 5,
     seed: int = 42,
+    task: str = 'frame',
+    quality_threshold: float | None = None,
 ) -> dict:
     """
     Run CV using only cached features - no dataset loading required.
@@ -214,6 +216,8 @@ def quick_cv(
         data_path: Path to data directory (for annotations.json)
         k: Number of CV folds
         seed: Random seed
+        task: 'frame' for boom frame prediction, 'quality' for boom quality prediction
+        quality_threshold: If set, filter to simulations with quality >= threshold
 
     Returns:
         Dict with predictions, ground_truth, and metrics
@@ -239,8 +243,18 @@ def quick_cv(
         print(f"Warning: Only {len(available)}/{len(annotations)} simulations cached")
     annotations = available
 
+    # Filter by quality if requested
+    if quality_threshold is not None:
+        annotations = [a for a in annotations if a.boom_quality >= quality_threshold]
+        print(f"Filtered to {len(annotations)} simulations with quality >= {quality_threshold}")
+
     ids = [a.id for a in annotations]
-    targets = np.array([a.boom_frame for a in annotations])
+
+    # Select targets based on task
+    if task == 'quality':
+        targets = np.array([a.boom_quality for a in annotations])
+    else:
+        targets = np.array([a.boom_frame for a in annotations])
 
     # Run CV
     kf = KFold(n_splits=k, shuffle=True, random_state=seed)
@@ -258,7 +272,7 @@ def quick_cv(
     return {
         'predictions': all_preds,
         'ground_truth': targets,
-        'metrics': compute_all_metrics(targets, all_preds, task='frame'),
+        'metrics': compute_all_metrics(targets, all_preds, task=task),
     }
 
 

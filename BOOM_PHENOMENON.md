@@ -103,10 +103,68 @@ The ML models work because they learn complex combinations of many features.
 
 **Note**: Phase 4 (changepoint detection + ensemble) was not fully evaluated because the ensemble methods with nested CV take 20+ minutes to run. The changepoint detectors alone performed worse than baseline (CUSUM MAE ~35, BOCPD similar).
 
+## Boom Quality Prediction (Phase 5)
+
+### Quality Distribution
+- Range: 0.10 - 0.92
+- Mean: 0.54, Std: 0.24
+- High quality (≥0.5): 30 simulations (61%)
+- Low quality (<0.5): 19 simulations (39%)
+
+### Quality-Error Correlation
+**Key Finding**: Quality strongly predicts frame detection error.
+
+| Quality Group | Frame MAE | Within 10 |
+|--------------|-----------|-----------|
+| High (≥0.5)  | 11.2      | 67%       |
+| Low (<0.5)   | 31.1      | 26%       |
+| All          | 18.9      | 51%       |
+
+Spearman correlation: -0.454 (p=0.001)
+
+### Quality Prediction Models
+
+| Model | MAE | Correlation | Notes |
+|-------|-----|-------------|-------|
+| Mean baseline | 0.228 | -0.329 | Just predict mean |
+| Median baseline | 0.233 | -0.280 | Just predict median |
+| Ridge regression | 0.211 | 0.309 | On sim-level features |
+| HistGBM regression | 0.228 | -0.015 | Overfits |
+| **Ridge boom-aware (w=50)** | **0.182** | **0.491** | Best - uses boom frame window |
+
+Binary Classification (high/low quality):
+- HistGBM: 59% accuracy, F1=0.74
+- Logistic: 55% accuracy, F1=0.67
+
+### Multi-Stage Pipeline Results
+
+Tested pipeline: Quality filter → Frame detector (trained on high-quality)
+
+| Approach | Overall MAE | High-Q MAE | Low-Q MAE |
+|----------|-------------|------------|-----------|
+| Baseline (single model) | 18.9 | 11.2 | 31.1 |
+| Train on high-Q only | 22.5 | 10.5 | 41.5 |
+| Conditional (oracle quality) | 18.7 | 10.5 | 31.6 |
+| Conditional (predicted quality) | 20.5 | 12.4 | 33.3 |
+
+**Conclusion**: Multi-stage pipeline doesn't improve overall performance because:
+1. Quality prediction isn't accurate enough (59% classification accuracy)
+2. Training on high-Q only hurts low-Q predictions significantly
+3. The benefit on high-Q cases is offset by the loss on low-Q cases
+
+### Best Models Summary
+
+| Task | Best Model | Performance |
+|------|------------|-------------|
+| Frame Detection | CNN | MAE 17.1, Within 10: 55% |
+| Frame Detection | HistGBM | MAE 18.9, Within 10: 51% |
+| Quality Prediction | Ridge boom-aware | MAE 0.182, Corr: 0.491 |
+
 ## Next Steps
 
 1. **Better clustering**: Use actual k-means or GMM instead of median-split
 2. **Velocity features**: Track cluster centroid velocities, detect approach
 3. **Temporal patterns**: Look for specific sequence signatures (separate→approach→merge)
 4. **Ensemble**: Combine CNN + HistGBM + convergence detector
-5. **Boom quality**: Use convergence clarity as predictor of boom_quality score
+5. **Quality as confidence**: Use predicted quality as confidence score, not filter
+6. **Weighted loss**: Train with higher weight on high-quality samples
