@@ -35,6 +35,27 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 | Within 5 frames | 63% ± 6% |
 | Acceptance rate | 35% ± 5% |
 
+### Current Deployable Configuration
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Agreement threshold | 5 frames | `\|CNN - HGB\| ≤ 5` |
+| Quality threshold | 0.55 | Predicted quality, not oracle |
+| Quality window | ±25 frames | Around avg(CNN, HGB) prediction |
+| Quality features | Top 50 | Selected by correlation with quality |
+| Final prediction | **CNN** | More accurate than HGB (MAE 7.1 vs 11.0) |
+
+```python
+from boom_detection.deploy_pipeline import BoomDetectionPipeline
+
+pipeline = BoomDetectionPipeline(
+    agreement_threshold=5,
+    quality_threshold=0.55,
+    quality_window=25,
+    n_quality_features=50,
+)
+```
+
 ### Key Improvements
 
 | Change | MAE | Acceptance | Notes |

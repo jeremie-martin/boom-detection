@@ -36,6 +36,54 @@ from .loader import Dataset, Simulation
 
 
 # =============================================================================
+# Selective Prediction Types (for abstaining/rejection pipelines)
+# =============================================================================
+
+@dataclass
+class SelectivePrediction:
+    """
+    A single prediction that may be accepted or rejected.
+
+    This is the canonical format for selective (abstaining) predictors.
+    Use this to ensure consistent handling across the codebase.
+    """
+    boom_frame: int | None  # None if rejected
+    accepted: bool
+    cnn_pred: int
+    hgb_pred: int
+    disagreement: int
+    predicted_quality: float
+    confidence: float | None = None  # Optional confidence score
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'SelectivePrediction':
+        """Create from a dictionary (e.g., from pipeline output)."""
+        return cls(
+            boom_frame=d.get('boom_frame'),
+            accepted=d['accepted'],
+            cnn_pred=d['cnn_pred'],
+            hgb_pred=d['hgb_pred'],
+            disagreement=d['disagreement'],
+            predicted_quality=d['predicted_quality'],
+            confidence=d.get('confidence'),
+        )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        d = {
+            'boom_frame': self.boom_frame,
+            'accepted': self.accepted,
+            'cnn_pred': self.cnn_pred,
+            'hgb_pred': self.hgb_pred,
+            'disagreement': self.disagreement,
+            'predicted_quality': self.predicted_quality,
+        }
+        if self.confidence is not None:
+            d['confidence'] = self.confidence
+        return d
+
+
+# =============================================================================
 # Metrics
 # =============================================================================
 
@@ -890,3 +938,271 @@ def robust_evaluate(
     return evaluator.cross_validate(
         predictor_fn, k=k, seeds=seeds, task=task, verbose=verbose
     )
+
+
+# =============================================================================
+# Selective (Abstaining) Metrics
+# =============================================================================
+
+def compute_selective_metrics(
+    predictions: list[SelectivePrediction],
+    true_booms: np.ndarray,
+    true_qualities: np.ndarray | None = None,
+) -> dict[str, float]:
+    """
+    Compute metrics for selective (abstaining) predictions.
+
+    These metrics separate coverage (acceptance rate) from accuracy.
+
+    Args:
+        predictions: List of SelectivePrediction objects
+        true_booms: Ground truth boom frames
+        true_qualities: Optional ground truth qualities
+
+    Returns:
+        Dictionary with selective metrics
+    """
+    n_total = len(predictions)
+    accepted_indices = [i for i, p in enumerate(predictions) if p.accepted]
+    n_accepted = len(accepted_indices)
+
+    metrics = {
+        'n_total': n_total,
+        'n_accepted': n_accepted,
+        'coverage': n_accepted / n_total if n_total > 0 else 0.0,
+        'rejection_rate': 1 - (n_accepted / n_total) if n_total > 0 else 1.0,
+    }
+
+    if n_accepted > 0:
+        # Compute errors only for accepted predictions
+        accepted_preds = [predictions[i] for i in accepted_indices]
+        accepted_booms = true_booms[accepted_indices]
+
+        errors = np.array([
+            abs(p.boom_frame - t) for p, t in zip(accepted_preds, accepted_booms)
+        ])
+
+        metrics['selective_mae'] = float(np.mean(errors))
+        metrics['selective_median_ae'] = float(np.median(errors))
+        metrics['selective_max_ae'] = float(np.max(errors))
+        metrics['selective_within_5'] = float(np.mean(errors <= 5))
+        metrics['selective_within_10'] = float(np.mean(errors <= 10))
+
+        # Quality of accepted simulations (if available)
+        if true_qualities is not None:
+            accepted_quals = true_qualities[accepted_indices]
+            metrics['mean_accepted_quality'] = float(np.mean(accepted_quals))
+            metrics['quality_precision'] = float(np.mean(accepted_quals >= 0.5))
+    else:
+        # No accepted predictions
+        metrics['selective_mae'] = float('nan')
+        metrics['selective_median_ae'] = float('nan')
+        metrics['selective_max_ae'] = float('nan')
+        metrics['selective_within_5'] = float('nan')
+        metrics['selective_within_10'] = float('nan')
+
+    # Rejection analysis
+    rejected_indices = [i for i, p in enumerate(predictions) if not p.accepted]
+    if rejected_indices:
+        # How many rejected were high quality?
+        if true_qualities is not None:
+            rejected_quals = true_qualities[rejected_indices]
+            metrics['rejected_high_quality_rate'] = float(np.mean(rejected_quals >= 0.5))
+
+    return metrics
+
+
+# =============================================================================
+# Run Artifacts (for reproducibility and results tracking)
+# =============================================================================
+
+@dataclass
+class RunArtifact:
+    """
+    Captures a complete evaluation run for reproducibility.
+
+    Stores config, metrics, per-simulation predictions, and environment info.
+    Can be saved to disk and loaded later for analysis.
+
+    Usage:
+        artifact = RunArtifact.create(
+            config={...},
+            predictions=[...],
+            true_booms=[...],
+            true_qualities=[...],
+        )
+        artifact.save(Path('runs/2025-01-01_exp1'))
+
+        # Later
+        artifact = RunArtifact.load(Path('runs/2025-01-01_exp1'))
+    """
+    config: dict
+    metrics: dict
+    predictions: list[dict]  # Per-simulation predictions
+    environment: dict
+    timestamp: str = ""
+
+    @classmethod
+    def create(
+        cls,
+        config: dict,
+        predictions: list[SelectivePrediction] | list[dict],
+        true_booms: np.ndarray,
+        true_qualities: np.ndarray | None = None,
+        sim_ids: list[str] | None = None,
+    ) -> 'RunArtifact':
+        """
+        Create a run artifact from predictions.
+
+        Args:
+            config: Pipeline/model configuration
+            predictions: List of SelectivePrediction or dicts
+            true_booms: Ground truth boom frames
+            true_qualities: Ground truth qualities
+            sim_ids: Simulation IDs (optional)
+
+        Returns:
+            RunArtifact ready for saving
+        """
+        import datetime
+        import sys
+        import subprocess
+
+        # Convert predictions to dicts if needed
+        if predictions and isinstance(predictions[0], SelectivePrediction):
+            pred_dicts = [p.to_dict() for p in predictions]
+            selective_preds = predictions
+        else:
+            pred_dicts = predictions
+            selective_preds = [SelectivePrediction.from_dict(p) for p in predictions]
+
+        # Add ground truth to predictions
+        for i, pd in enumerate(pred_dicts):
+            pd['true_boom'] = int(true_booms[i])
+            if true_qualities is not None:
+                pd['true_quality'] = float(true_qualities[i])
+            if sim_ids is not None:
+                pd['sim_id'] = sim_ids[i]
+
+        # Compute metrics
+        metrics = compute_selective_metrics(
+            selective_preds, true_booms, true_qualities
+        )
+
+        # Capture environment
+        try:
+            git_commit = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()[:8]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            git_commit = "unknown"
+
+        environment = {
+            'python_version': sys.version.split()[0],
+            'git_commit': git_commit,
+        }
+
+        timestamp = datetime.datetime.now().isoformat()
+
+        return cls(
+            config=config,
+            metrics=metrics,
+            predictions=pred_dicts,
+            environment=environment,
+            timestamp=timestamp,
+        )
+
+    def save(self, path: Path) -> None:
+        """
+        Save artifact to directory.
+
+        Creates:
+            path/config.json
+            path/metrics.json
+            path/predictions.jsonl
+            path/environment.json
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        with open(path / 'config.json', 'w') as f:
+            json.dump(self.config, f, indent=2)
+
+        with open(path / 'metrics.json', 'w') as f:
+            json.dump(self.metrics, f, indent=2)
+
+        with open(path / 'predictions.jsonl', 'w') as f:
+            for pred in self.predictions:
+                f.write(json.dumps(pred) + '\n')
+
+        env_with_meta = {
+            **self.environment,
+            'timestamp': self.timestamp,
+        }
+        with open(path / 'environment.json', 'w') as f:
+            json.dump(env_with_meta, f, indent=2)
+
+    @classmethod
+    def load(cls, path: Path) -> 'RunArtifact':
+        """Load artifact from directory."""
+        path = Path(path)
+
+        with open(path / 'config.json') as f:
+            config = json.load(f)
+
+        with open(path / 'metrics.json') as f:
+            metrics = json.load(f)
+
+        predictions = []
+        with open(path / 'predictions.jsonl') as f:
+            for line in f:
+                predictions.append(json.loads(line))
+
+        with open(path / 'environment.json') as f:
+            env_data = json.load(f)
+            timestamp = env_data.pop('timestamp', '')
+            environment = env_data
+
+        return cls(
+            config=config,
+            metrics=metrics,
+            predictions=predictions,
+            environment=environment,
+            timestamp=timestamp,
+        )
+
+    def summary(self) -> str:
+        """Generate a human-readable summary."""
+        lines = [
+            f"Run Artifact ({self.timestamp})",
+            "=" * 60,
+            "",
+            "Metrics:",
+        ]
+
+        for name, value in sorted(self.metrics.items()):
+            if isinstance(value, float):
+                if name.startswith('selective_within') or name.endswith('rate'):
+                    lines.append(f"  {name}: {value:.1%}")
+                elif not np.isnan(value):
+                    lines.append(f"  {name}: {value:.2f}")
+                else:
+                    lines.append(f"  {name}: N/A")
+            else:
+                lines.append(f"  {name}: {value}")
+
+        lines.extend([
+            "",
+            "Config:",
+        ])
+        for key, value in sorted(self.config.items()):
+            lines.append(f"  {key}: {value}")
+
+        lines.extend([
+            "",
+            f"Environment: Python {self.environment.get('python_version', '?')}, "
+            f"git {self.environment.get('git_commit', '?')}",
+        ])
+
+        return "\n".join(lines)

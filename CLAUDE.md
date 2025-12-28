@@ -11,16 +11,13 @@ This means:
 - Rejecting low-quality simulations is acceptable (can generate more)
 - For accepted simulations, we want accurate boom detection
 
-**Current best**: MAE 7.2 ± 1.1 frames with ~33% acceptance rate (robust 5-seed evaluation)
+**Current best**: MAE 6.4 ± 0.5 frames with ~35% acceptance rate (robust 5-seed evaluation)
+
+**Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
 ## What is the Boom?
 
-The boom is when **two groups of pendulums converge**:
-1. **Before boom**: Pendulums separate into 2+ distinct clusters
-2. **At boom**: Clusters CONVERGE at a single point (collision effect)
-3. **After boom**: Caustic patterns emerge, explosion
-
-See `docs/EXPERIMENT_HISTORY.md` for detailed experimental findings.
+The boom is the moment of chaotic divergence: when nearly-identical pendulums suddenly spread apart due to sensitivity to initial conditions (the butterfly effect). The boom is the visually dramatic moment when chaos erupts. But the boom moment is NOT when pendulums slowly start diverging, the boom moment marks the explosion of chaotic divergence. There's a clear before/after. A boom with a high "boom quality score" is typically a boom that any human would trivially and objectively be able to find. Simulation with a low quality boom score (as annotated in the dataset) typically have a not-so-well-defined boom moment (it can be very ambiguous, there's not one clear "boom" moment, sometimes it can drags on, sometimes we can hesitate with different boom moments etc.). High quality boom typtically involves the pendulums slowly separating into 2+ distinct clusters (before boom) before accelerating and then meeting at high speed (boom moment), with caustic patterns emerging often at least a bit before the boom moment (and definitely right after it, since caustic-like patterns emerge from the chaotic divergence of such a simulation, and the boom moment marks the visually dramatic moment when true chaotic divergence begins).
 
 ## Key Patterns
 
@@ -36,7 +33,7 @@ pipeline.fit(sim_ids, boom_frames, qualities, cache)
 result = pipeline.predict_one(features)
 
 if result['accepted']:
-    boom_frame = result['boom_frame']  # Use HGB prediction
+    boom_frame = result['boom_frame']  # Uses CNN prediction (more accurate than HGB)
 ```
 
 ### Robust Evaluation (IMPORTANT!)
@@ -107,7 +104,7 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 ## Key Findings
 
 1. **Model agreement is the best confidence signal** - better than quality prediction alone
-2. **Use HGB, not average** - when models agree, HGB alone is more accurate
+2. **Use CNN, not HGB or average** - CNN is more accurate (MAE 7.1 vs 11.0) and has lower variance
 3. **Quality threshold 0.55 works** - higher than initially expected
 4. **CNN benefits from all features**, HistGBM benefits from feature selection
 

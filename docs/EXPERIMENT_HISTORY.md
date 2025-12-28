@@ -1,5 +1,16 @@
 # Boom Detection Project
 
+> ⚠️ **IMPORTANT**: This document contains experimental history with various configurations.
+> The **current deployable configuration** achieves **MAE 6.4 ± 0.5** with **35% acceptance** using:
+> - Agreement threshold: 5 frames
+> - Quality threshold: 0.55 (predicted, not oracle)
+> - Final prediction: **CNN** (not HGB)
+>
+> See `RESULTS.md` for the canonical current results.
+> Some results below used oracle quality (ground truth annotations) which is NOT available at inference time.
+
+---
+
 ## Project Goal (Clarified)
 
 **The goal is NOT to accurately detect boom frames on ALL simulations.**
@@ -16,14 +27,14 @@ Implications:
 1. Run CNN and HistGBM
 2. Check if they agree (within 5 frames)
 3. Predict quality using features around predicted boom
-4. If both pass → use **HGB prediction** (not average!)
+4. If both pass → use **CNN prediction** (more accurate than HGB)
 
-| Configuration | Accepted | MAE | Within 5 | Within 3 |
-|--------------|----------|-----|----------|----------|
-| Agree≤5, PredQ≥0.55 | 27% | **4.0** | 77% | 62% |
-| Agree≤9, PredQ≥0.6 | 29% | **4.1** | 79% | 57% |
+| Configuration | Accepted | MAE | Notes |
+|--------------|----------|-----|-------|
+| Agree≤5, PredQ≥0.55, CNN | 35% | **6.4** | **Current deployable** |
 
-**MAE 4.0 achieved** - below target of 5, fully deployable!
+> **Note**: Earlier results showing MAE 4.0 used different evaluation or thresholds.
+> The canonical result is MAE 6.4 ± 0.5 with 35% acceptance (see RESULTS.md).
 
 ---
 

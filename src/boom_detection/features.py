@@ -64,8 +64,8 @@ def iqr_features(data: np.ndarray) -> np.ndarray:
     Returns:
         Shape (frames, 8) - IQR of each field
     """
-    q75 = np.percentile(data, 75, axis=1)
-    q25 = np.percentile(data, 25, axis=1)
+    # Single pass for both percentiles
+    q25, q75 = np.percentile(data, [25, 75], axis=1)
     return q75 - q25
 
 
@@ -154,7 +154,10 @@ def tip_spread_features(data: np.ndarray) -> np.ndarray:
         data: Shape (frames, pendulums, 8)
 
     Returns:
-        Shape (frames, 3) - [area, max_dist, mean_dist_from_centroid]
+        Shape (frames, 3) - [bounding_box_area, max_dist, mean_dist_from_centroid]
+
+    Note:
+        tip_area is the bounding box area (x_range * y_range), not convex hull area.
     """
     x2 = data[:, :, X2]  # (frames, pendulums)
     y2 = data[:, :, Y2]
@@ -525,8 +528,15 @@ class FeatureConfig:
     include_relative: bool = False  # relative features (ratio to max, percentile)
 
 
-# Default configuration
+# Default configuration (without caustic features for backwards compatibility)
 DEFAULT_CONFIG = FeatureConfig()
+
+# Production configuration with caustic features enabled
+# Use this for deployment - caustic features improve accuracy ~0.3-0.5 MAE
+PRODUCTION_CONFIG = FeatureConfig(
+    max_pendulums=2000,
+    include_caustic=True,
+)
 
 # Enhanced configuration with temporal features (Phase 2)
 ENHANCED_CONFIG = FeatureConfig(

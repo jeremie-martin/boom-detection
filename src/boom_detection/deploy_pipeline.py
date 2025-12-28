@@ -42,7 +42,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegress
 from sklearn.model_selection import KFold
 
 from .loader import load_dataset
-from .features import FeatureCache, FeatureConfig
+from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
 from .sequence_models import CNNClassifier, SequenceTrainer
 
 
@@ -149,8 +149,26 @@ class BoomDetectionPipeline:
                 - hgb_pred: HGB prediction
                 - disagreement: |CNN - HGB|
                 - predicted_quality: Quality prediction
+
+        Raises:
+            TypeError: If features is not a numpy array
+            ValueError: If features has wrong shape
+            RuntimeError: If pipeline has not been fitted
         """
         import torch
+
+        # Input validation
+        if self.cnn is None or self.hgb is None:
+            raise RuntimeError("Pipeline not fitted. Call fit() first.")
+        if not isinstance(features, np.ndarray):
+            raise TypeError(f"Expected ndarray, got {type(features).__name__}")
+        if features.ndim != 2:
+            raise ValueError(f"Expected 2D array (frames, features), got {features.ndim}D")
+        if features.shape[1] != self.n_features:
+            raise ValueError(
+                f"Expected {self.n_features} features, got {features.shape[1]}. "
+                "Ensure feature extraction uses the same config as training."
+            )
 
         # CNN prediction
         self.cnn.eval()
@@ -320,6 +338,8 @@ def main():
     parser.add_argument('--output', type=Path, help='Output directory for models')
     parser.add_argument('--agreement', type=int, default=5, help='Agreement threshold')
     parser.add_argument('--quality', type=float, default=0.55, help='Quality threshold')
+    parser.add_argument('--production', action='store_true',
+                        help='Use PRODUCTION_CONFIG with caustic features (recommended)')
     args = parser.parse_args()
 
     # Load data
@@ -332,7 +352,11 @@ def main():
 
     # Build feature cache
     print("Building feature cache...")
-    config = FeatureConfig()
+    if args.production:
+        print("Using PRODUCTION_CONFIG with caustic features")
+        config = PRODUCTION_CONFIG
+    else:
+        config = FeatureConfig()
     cache = FeatureCache(config, cache_dir='.feature_cache')
     cache.extract_all(dataset, verbose=False)
 

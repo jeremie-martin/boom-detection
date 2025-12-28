@@ -15,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import random
 from typing import Literal
 
 import numpy as np
@@ -24,6 +25,21 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from .features import FeatureCache
+
+
+def set_global_seed(seed: int) -> None:
+    """Set random seeds for reproducibility across all libraries.
+
+    Call this before training to ensure reproducible results.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        # These settings ensure determinism but may slow down training
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 # =============================================================================
@@ -229,9 +245,9 @@ class BoomDataset(Dataset):
         boom_frame = int(self.boom_frames[idx])
         features = self.cache[sim_id]  # (frames, n_features)
 
-        # Data augmentation
+        # Data augmentation (returns adjusted boom_frame if time scaling applied)
         if self.augment:
-            features = self._augment(features)
+            features, boom_frame = self._augment(features, boom_frame)
 
         # Create labels: 1 if frame >= boom_frame, else 0
         n_frames = len(features)
@@ -243,14 +259,23 @@ class BoomDataset(Dataset):
             boom_frame,
         )
 
-    def _augment(self, features: np.ndarray) -> np.ndarray:
-        """Apply data augmentation."""
-        # Add small noise
+    def _augment(self, features: np.ndarray, boom_frame: int) -> tuple[np.ndarray, int]:
+        """Apply data augmentation.
+
+        Args:
+            features: (frames, n_features) array
+            boom_frame: Original boom frame index
+
+        Returns:
+            Tuple of (augmented_features, adjusted_boom_frame)
+        """
+        # Add small noise (doesn't change alignment)
         if np.random.random() < 0.5:
             noise = np.random.randn(*features.shape) * 0.01
             features = features + noise
 
         # Random time scaling (stretch/compress slightly)
+        # IMPORTANT: Must adjust boom_frame when scaling!
         if np.random.random() < 0.3:
             scale = np.random.uniform(0.95, 1.05)
             n_frames = len(features)
@@ -258,8 +283,11 @@ class BoomDataset(Dataset):
             if new_n_frames > 0:
                 indices = np.linspace(0, n_frames - 1, new_n_frames)
                 features = np.array([features[int(i)] for i in indices])
+                # Adjust boom_frame proportionally
+                boom_frame = int(round(boom_frame * scale))
+                boom_frame = max(0, min(boom_frame, new_n_frames - 1))
 
-        return features
+        return features, boom_frame
 
 
 def collate_variable_length(batch):
@@ -300,10 +328,11 @@ class SequenceTrainer:
         device: str = 'auto',
         lr: float = 1e-3,
         epochs: int = 50,
-        batch_size: int = 8,
+        batch_size: int = 32,
         patience: int = 10,
         augment: bool = True,
         verbose: bool = False,
+        seed: int | None = None,
     ):
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -315,6 +344,7 @@ class SequenceTrainer:
         self.patience = patience
         self.augment = augment
         self.verbose = verbose
+        self.seed = seed
 
     def fit(
         self,
@@ -323,6 +353,10 @@ class SequenceTrainer:
         cache: FeatureCache,
     ) -> None:
         """Train the model."""
+        # Set seed for reproducibility if provided
+        if self.seed is not None:
+            set_global_seed(self.seed)
+
         # Reset model weights
         self._reset_weights()
 
