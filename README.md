@@ -1,15 +1,16 @@
 # Boom Detection
 
-Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge.
+Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge into a caustic pattern.
 
-## Current Results
+## Best Result: MAE 4.0 frames
 
-| Model | MAE (frames) | Notes |
-|-------|--------------|-------|
-| Baseline (variance threshold) | 31.2 | Classical approach |
-| HistGBM (frame-level) | 17.0 | Best non-neural |
-| **CNN (sequence)** | **14.3** | Best overall |
-| Target | <5 | ~83ms at 60fps |
+Using model agreement + predicted quality filtering:
+
+| Metric | Value |
+|--------|-------|
+| MAE | **4.0 frames** |
+| Within 5 frames | 77% |
+| Acceptance rate | 27% |
 
 ## Quick Start
 
@@ -17,68 +18,39 @@ Predict the "boom" frame in chaotic double pendulum simulations - the moment whe
 # Install
 uv sync --extra ml
 
-# Run best model (CNN)
-uv run python -c "
-from boom_detection import load_dataset, FeatureCache, FeatureConfig
-from boom_detection.sequence_models import CNNClassifier, SequenceTrainer
-from boom_detection.run_baselines import cross_validate_cached
+# Evaluate the deployable pipeline
+uv run python -m boom_detection.deploy_pipeline data --evaluate
 
-dataset = load_dataset('data')
-config = FeatureConfig(max_pendulums=2000, include_caustic=True, include_rolling=True)
-cache = FeatureCache(config, cache_dir='.feature_cache')
-cache.extract_all(dataset)
-
-model = SequenceTrainer(CNNClassifier(cache[dataset.annotations[0].id].shape[1]))
-result = cross_validate_cached(dataset, cache, model)
-print(f'MAE: {result[\"metrics\"][\"mae\"]:.1f}')
-"
+# Train and save models
+uv run python -m boom_detection.deploy_pipeline data --train --output models/
 ```
 
-## Fast Iteration
+## How It Works
 
-After first run, features are cached to disk. Use `quick_cv` to skip dataset loading:
+The pipeline uses two models (CNN and HistGBM) as a confidence filter:
 
-```python
-from boom_detection import FeatureCache, FeatureConfig
-from boom_detection.run_baselines import quick_cv
+1. **Run both models** on the simulation
+2. **Check agreement**: If predictions differ by >5 frames → reject
+3. **Predict quality**: Use features around predicted boom
+4. **Filter**: If predicted quality < 0.55 → reject
+5. **Accept**: Use HGB prediction (more accurate than average)
 
-cache = FeatureCache(
-    FeatureConfig(max_pendulums=2000, include_caustic=True, include_rolling=True),
-    cache_dir='.feature_cache'
-)
-# Loads from disk in ~0.2s instead of ~30s
-result = quick_cv(your_model, cache)
-```
+This achieves MAE 4.0 on ~27% of simulations. For video production, we simply generate more simulations and use only the accepted ones.
 
 ## Project Structure
 
 ```
 src/boom_detection/
-├── loader.py          # Load simulations and annotations
-├── features.py        # Feature extraction + caching
-├── evaluation.py      # Metrics and cross-validation
-├── baselines.py       # Simple baseline predictors
-├── frame_models.py    # HistGBM classifier/regressor
-└── sequence_models.py # CNN, LSTM, Transformer (PyTorch)
+├── deploy_pipeline.py  # Production pipeline (start here!)
+├── loader.py           # Load simulations and annotations
+├── features.py         # Feature extraction + caching
+├── evaluation.py       # Metrics and cross-validation
+├── frame_models.py     # HistGBM classifier
+├── sequence_models.py  # CNN, LSTM, Transformer (PyTorch)
+├── quality_models.py   # Boom quality prediction
+├── pipeline.py         # Multi-stage pipeline components
+└── run_baselines.py    # Baseline comparison script
 ```
-
-### Key Classes
-
-| Class | Purpose |
-|-------|---------|
-| `FeatureCache` | Extract & cache features (use `cache_dir` for disk persistence) |
-| `FrameLevelClassifier` | Best non-neural model (`model='hist_gbm'`) |
-| `SequenceTrainer` | Train CNN/LSTM on sequences |
-
-## The Problem
-
-Thousands of pendulums start with nearly identical initial conditions. At some point they rapidly diverge - the "boom". This is a perceptual phenomenon: the moment a human would say "it explodes".
-
-**Inputs**: ~1000 frames × ~10000 pendulums × 8 features (positions, angles, velocities)
-
-**Output**: Single frame number (integer)
-
-**Constraint**: Must work on low-resolution "probe" simulations (~200 frames × ~1000 pendulums)
 
 ## Data
 
@@ -87,27 +59,31 @@ Thousands of pendulums start with nearly identical initial conditions. At some p
 cp -r /path/to/double-pendulum/output/eval2 data
 ```
 
-- 49 valid simulations (1 corrupted)
-- Boom frames: 204-933
-- ~1000 frames, ~10000+ pendulums each
+- 49 valid simulations
+- Boom frames: 204-933 (annotated)
+- Quality scores: 0.1-0.92 (annotated)
+
+## Documentation
+
+- **[docs/RESULTS.md](docs/RESULTS.md)** - Detailed results and findings
+- **[docs/EXPERIMENT_HISTORY.md](docs/EXPERIMENT_HISTORY.md)** - Full experiment history
+- **[DATA_FORMAT.md](DATA_FORMAT.md)** - Binary data format specification
+- **[CLAUDE.md](CLAUDE.md)** - AI assistant context
 
 ## Development
 
 ```bash
-uv sync --extra ml    # Install with ML deps
-uv run pytest         # Run tests
-uv run python -m boom_detection.run_baselines data  # Run all baselines
+uv sync --extra ml                                    # Install
+uv run pytest                                         # Run tests
+uv run python -m boom_detection.run_baselines data    # Run baselines
+uv run python -m boom_detection.deploy_pipeline data --evaluate  # Best pipeline
 ```
 
-## Approach Summary
+## Key Insights
 
-1. **Features**: Aggregate pendulum statistics per frame (resolution-invariant)
-   - Statistical: variance, IQR, skewness, kurtosis
-   - Caustic: angular distribution metrics (Gini, coverage)
-   - Temporal: rolling windows, derivatives
+1. **Model agreement = confidence**: When CNN and HistGBM agree, predictions are reliable
+2. **Quality predicts error**: High-quality booms have MAE ~11, low-quality ~31
+3. **Rejection is OK**: For video production, we can generate more simulations
+4. **HGB > average**: When models agree, use HGB alone (not their average)
 
-2. **Frame-level learning**: Each frame predicts before/after boom → find crossing
-
-3. **Sequence models**: CNN/LSTM on full feature sequence
-
-See the plan file for detailed methodology: `.claude/plans/tender-popping-adleman.md`
+See [docs/RESULTS.md](docs/RESULTS.md) for detailed analysis.

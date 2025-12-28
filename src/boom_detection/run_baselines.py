@@ -1,5 +1,5 @@
 """
-Run all baseline predictors and compare results.
+Run baseline predictors and compare results.
 
 Usage:
     uv run python -m boom_detection.run_baselines data
@@ -17,9 +17,7 @@ import numpy as np
 from .loader import load_dataset, Dataset
 from .evaluation import compute_all_metrics
 from .features import FeatureCache, FeatureConfig
-from .frame_models import get_frame_level_predictors, FrameLevelClassifier
-from .changepoint import CUSUMDetector, BOCPDDetector, MultiFeatureCUSUM
-from .ensemble import AdaptiveEnsemble, create_default_ensemble
+from .frame_models import get_frame_level_predictors
 
 
 # =============================================================================
@@ -280,30 +278,6 @@ def quick_cv(
 # Evaluation with caching
 # =============================================================================
 
-def _run_fold(fold_data: tuple) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run a single CV fold. Used by parallel CV."""
-    (train_idx, test_idx, ids, targets, features_dict, predictor_factory) = fold_data
-
-    # Reconstruct a simple cache-like object for the predictor
-    class SimpleCache:
-        def __init__(self, data: dict):
-            self._data = data
-        def __getitem__(self, key: str) -> np.ndarray:
-            return self._data[key]
-
-    cache = SimpleCache(features_dict)
-    predictor = predictor_factory()
-
-    train_ids = [ids[i] for i in train_idx]
-    test_ids = [ids[i] for i in test_idx]
-    train_y = targets[train_idx]
-
-    predictor.fit(train_ids, train_y, cache)
-    preds = predictor.predict(test_ids, cache)
-
-    return test_idx, preds, targets[test_idx]
-
-
 def cross_validate_cached(
     dataset: Dataset,
     cache: FeatureCache,
@@ -311,7 +285,6 @@ def cross_validate_cached(
     k: int = 5,
     seed: int = 42,
     task: str = "frame",
-    n_jobs: int = 1,
 ) -> dict:
     """
     Run k-fold CV using cached features.
@@ -319,13 +292,10 @@ def cross_validate_cached(
     Args:
         dataset: Dataset with annotations
         cache: FeatureCache with extracted features
-        predictor: Predictor instance (will be cloned for parallel execution)
+        predictor: Predictor instance
         k: Number of CV folds
         seed: Random seed for reproducibility
         task: 'frame' or 'quality'
-        n_jobs: Number of parallel jobs. 1=sequential, -1=all cores.
-                Note: If predictor uses all cores internally (e.g., HistGBM),
-                setting n_jobs>1 may cause resource contention.
     """
     from sklearn.model_selection import KFold
 
@@ -340,42 +310,14 @@ def cross_validate_cached(
     all_preds = np.zeros(len(ids))
     all_gt = targets.copy()
 
-    if n_jobs == 1:
-        # Sequential execution (default, most efficient for HistGBM)
-        for train_idx, test_idx in kf.split(ids):
-            train_ids = [ids[i] for i in train_idx]
-            test_ids = [ids[i] for i in test_idx]
-            train_y = targets[train_idx]
+    for train_idx, test_idx in kf.split(ids):
+        train_ids = [ids[i] for i in train_idx]
+        test_ids = [ids[i] for i in test_idx]
+        train_y = targets[train_idx]
 
-            predictor.fit(train_ids, train_y, cache)
-            preds = predictor.predict(test_ids, cache)
-            all_preds[test_idx] = preds
-    else:
-        # Parallel execution using joblib
-        from joblib import Parallel, delayed
-        import copy
-
-        # Extract features to dict (small, serializable)
-        features_dict = {sim_id: cache[sim_id] for sim_id in ids}
-
-        # Create a factory function that returns fresh predictor instances
-        def predictor_factory():
-            return copy.deepcopy(predictor)
-
-        # Prepare fold data
-        fold_data = [
-            (train_idx, test_idx, ids, targets, features_dict, predictor_factory)
-            for train_idx, test_idx in kf.split(ids)
-        ]
-
-        # Run folds in parallel
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(_run_fold)(data) for data in fold_data
-        )
-
-        # Collect results
-        for test_idx, preds, _ in results:
-            all_preds[test_idx] = preds
+        predictor.fit(train_ids, train_y, cache)
+        preds = predictor.predict(test_ids, cache)
+        all_preds[test_idx] = preds
 
     return {
         'predictions': all_preds,
@@ -401,39 +343,12 @@ def get_baselines(include_frame_level: bool = True) -> dict[str, object]:
     return baselines
 
 
-def get_changepoint_detectors() -> dict[str, object]:
-    """Get change point detection predictors."""
-    return {
-        'cusum': CUSUMDetector(feature_idx=2, use_derivative=True),  # var_x2
-        'cusum_no_deriv': CUSUMDetector(feature_idx=2, use_derivative=False),
-        'bocpd': BOCPDDetector(feature_idx=2, hazard_rate=1/200),
-        'multi_cusum': MultiFeatureCUSUM(n_features=5, combination='median'),
-    }
-
-
-def get_ensemble_predictors(n_features: int) -> dict[str, object]:
-    """Get ensemble predictors."""
-    # Simple ensemble with best models
-    histgbm = FrameLevelClassifier(model='hist_gbm', n_estimators=200, max_depth=7)
-    cusum = MultiFeatureCUSUM(n_features=5, combination='median')
-
-    simple_ensemble = AdaptiveEnsemble(weight_method='inverse_mae')
-    simple_ensemble.add_model('histgbm', histgbm)
-    simple_ensemble.add_model('cusum', cusum)
-
-    return {
-        'ensemble_histgbm_cusum': simple_ensemble,
-    }
-
-
 def run_baselines(
     data_path: str,
     k: int = 5,
     seed: int = 42,
     max_samples: int | None = None,
-    max_pendulums: int | None = 2000,  # Default to 2000 for speed
-    include_changepoint: bool = False,
-    include_ensemble: bool = False,
+    max_pendulums: int | None = 2000,
 ):
     """Run all baselines and print comparison."""
     print(f"Loading dataset from: {data_path}")
@@ -448,7 +363,7 @@ def run_baselines(
     print(f"Loaded {len(dataset)} simulations in {time.time() - t0:.1f}s")
     print()
 
-    # Extract features once (with optional subsampling for speed)
+    # Extract features once
     print("Extracting features (one-time cost)...")
     t0 = time.time()
     config = FeatureConfig(max_pendulums=max_pendulums) if max_pendulums else None
@@ -460,15 +375,6 @@ def run_baselines(
 
     # Run baselines
     baselines = get_baselines()
-
-    # Add changepoint detectors if requested
-    if include_changepoint:
-        baselines.update(get_changepoint_detectors())
-
-    # Add ensemble predictors if requested
-    if include_ensemble:
-        baselines.update(get_ensemble_predictors(n_features))
-
     results = {}
 
     print(f"Running {k}-fold cross-validation (seed={seed})")
@@ -516,20 +422,13 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--max-pendulums", type=int, default=2000, help="Subsample pendulums (default: 2000, 0=all)")
     parser.add_argument("-k", "--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--changepoint", action="store_true", help="Include change point detectors")
-    parser.add_argument("--ensemble", action="store_true", help="Include ensemble predictors")
-    parser.add_argument("--phase4", action="store_true", help="Run Phase 4 models (changepoint + ensemble)")
     args = parser.parse_args()
 
     max_pendulums = args.max_pendulums if args.max_pendulums > 0 else None
-    include_changepoint = args.changepoint or args.phase4
-    include_ensemble = args.ensemble or args.phase4
     run_baselines(
         args.data_path,
         k=args.folds,
         seed=args.seed,
         max_samples=args.max_samples,
         max_pendulums=max_pendulums,
-        include_changepoint=include_changepoint,
-        include_ensemble=include_ensemble,
     )

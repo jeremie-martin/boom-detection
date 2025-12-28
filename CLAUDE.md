@@ -7,34 +7,37 @@
 The actual goal is: **Produce high-quality animations with accurate boom detection for YouTube/social media.**
 
 This means:
-- We only care about HIGH-QUALITY simulations (quality >= 0.5 or higher)
-- Rejecting low-quality simulations is acceptable (we can generate more)
-- For simulations we ACCEPT, we need MAE close to 5 frames
+- We only care about HIGH-QUALITY simulations
+- Rejecting low-quality simulations is acceptable (can generate more)
+- For accepted simulations, we need MAE close to 5 frames
 
-## What This Is
-
-Predict the "boom" frame in double pendulum simulations. See README.md for full context.
-
-**Current best approach**: Model agreement filter
-- When CNN and HistGBM agree (within 10 frames): **MAE 6.8-7.2** (close to target!)
-- Accept ~60% of simulations (mostly high-quality)
-- This is deployable at inference time
-
-**Key finding**: Model agreement is a powerful confidence indicator, correlated with quality (Spearman -0.498).
+**Current best**: MAE 4.0 with 27% acceptance rate (deployable pipeline)
 
 ## What is the Boom?
 
-The boom is **NOT** just when pendulums diverge. It's when **two groups converge**:
-
+The boom is when **two groups of pendulums converge**:
 1. **Before boom**: Pendulums separate into 2+ distinct clusters
 2. **At boom**: Clusters CONVERGE at a single point (collision effect)
 3. **After boom**: Caustic patterns emerge, explosion
 
-See `BOOM_PHENOMENON.md` for detailed visual analysis and experimental findings.
-
-**Key insight**: Direct convergence detection is hard. ML models work better by learning complex feature combinations.
+See `docs/EXPERIMENT_HISTORY.md` for detailed experimental findings.
 
 ## Key Patterns
+
+### The Deployable Pipeline
+```python
+from boom_detection.deploy_pipeline import BoomDetectionPipeline
+
+pipeline = BoomDetectionPipeline(
+    agreement_threshold=5,
+    quality_threshold=0.55,
+)
+pipeline.fit(sim_ids, boom_frames, qualities, cache)
+result = pipeline.predict_one(features)
+
+if result['accepted']:
+    boom_frame = result['boom_frame']  # Use HGB prediction
+```
 
 ### Fast Iteration
 ```python
@@ -56,30 +59,22 @@ class MyModel:
         return np.array([self._predict_one(cache[sid]) for sid in sim_ids])
 ```
 
-### Adding New Features
-Add to `features.py`, then update:
-1. Add extraction function
-2. Add to `FeatureConfig` (with `include_X` flag)
-3. Add to `FEATURE_GROUPS` for names
-4. Add to `transform()` method
-
 ### Resolution Invariance
 All features must aggregate over pendulums (axis=1) so they work regardless of pendulum count.
 
 ## File Guide
 
-| File | When to modify |
-|------|----------------|
-| `features.py` | Adding new features |
-| `frame_models.py` | Adding sklearn-based models |
-| `sequence_models.py` | Adding PyTorch models |
-| `quality_models.py` | Quality prediction models |
-| `pipeline.py` | Multi-stage quality-aware pipeline |
-| `convergence.py` | Convergence/bimodality detection (experimental) |
-| `changepoint.py` | CUSUM/BOCPD detectors |
-| `ensemble.py` | Model ensembling |
-| `run_baselines.py` | Adding evaluation utilities |
-| `evaluation.py` | Changing metrics |
+| File | Purpose |
+|------|---------|
+| `deploy_pipeline.py` | **Start here** - production pipeline |
+| `features.py` | Feature extraction + caching |
+| `frame_models.py` | HistGBM classifier |
+| `sequence_models.py` | CNN, LSTM, Transformer |
+| `quality_models.py` | Quality prediction |
+| `pipeline.py` | Multi-stage pipeline components |
+| `run_baselines.py` | Baseline comparison |
+| `evaluation.py` | Metrics |
+| `ensemble.py` | Adaptive ensemble |
 
 ## Do
 
@@ -91,5 +86,14 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 ## Don't
 
 - Don't use `metadata.json` boom_frame (unreliable auto-detection)
-- Don't load full dataset for quick experiments (use `quick_cv`)
-- Don't commit `.feature_cache/` (in .gitignore)
+- Don't use oracle quality at inference (annotations not available)
+- Don't commit `.feature_cache/`
+
+## Key Findings
+
+1. **Model agreement is the best confidence signal** - better than quality prediction alone
+2. **Use HGB, not average** - when models agree, HGB alone is more accurate
+3. **Quality threshold 0.55 works** - higher than initially expected
+4. **CNN benefits from all features**, HistGBM benefits from feature selection
+
+See `docs/RESULTS.md` for detailed results.

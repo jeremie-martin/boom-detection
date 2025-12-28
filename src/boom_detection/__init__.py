@@ -32,16 +32,6 @@ from .features import (
     CAUSTIC_CONFIG,
 )
 
-from .baselines import (
-    MeanPredictor,
-    MedianPredictor,
-    VarianceThresholdPredictor,
-    DerivativeThresholdPredictor,
-    SecondDerivativePredictor,
-    LinearRegressionPredictor,
-    get_all_baselines,
-)
-
 from .frame_models import (
     FrameLevelRegressor,
     FrameLevelClassifier,
@@ -56,27 +46,8 @@ from .sequence_models import (
     get_sequence_models,
 )
 
-from .changepoint import (
-    CUSUMDetector,
-    BOCPDDetector,
-    MultiFeatureCUSUM,
-)
-
 from .ensemble import (
-    WeightedEnsemble,
-    StackingEnsemble,
     AdaptiveEnsemble,
-    create_default_ensemble,
-)
-
-from .convergence import (
-    angular_bimodality,
-    cluster_distance,
-    convergence_rate,
-    tip_concentration,
-    extract_convergence_features,
-    ConvergenceDetector,
-    BimodalityDetector,
 )
 
 from .quality_models import (
@@ -92,6 +63,16 @@ from .pipeline import (
     QualityFilter,
     QualityAwarePipeline,
     ConditionalPipeline,
+)
+
+from .model_agreement import (
+    ModelAgreementAnalyzer,
+    ConfidenceWeightedEnsemble,
+)
+
+from .deploy_pipeline import (
+    BoomDetectionPipeline,
+    cross_validate as cv_pipeline,
 )
 
 __all__ = [
@@ -121,14 +102,6 @@ __all__ = [
     "extract_features",
     "get_feature_names",
     "CAUSTIC_CONFIG",
-    # Baselines
-    "MeanPredictor",
-    "MedianPredictor",
-    "VarianceThresholdPredictor",
-    "DerivativeThresholdPredictor",
-    "SecondDerivativePredictor",
-    "LinearRegressionPredictor",
-    "get_all_baselines",
     # Frame-level models
     "FrameLevelRegressor",
     "FrameLevelClassifier",
@@ -139,23 +112,8 @@ __all__ = [
     "TransformerClassifier",
     "SequenceTrainer",
     "get_sequence_models",
-    # Change point detection
-    "CUSUMDetector",
-    "BOCPDDetector",
-    "MultiFeatureCUSUM",
     # Ensemble
-    "WeightedEnsemble",
-    "StackingEnsemble",
     "AdaptiveEnsemble",
-    "create_default_ensemble",
-    # Convergence detection
-    "angular_bimodality",
-    "cluster_distance",
-    "convergence_rate",
-    "tip_concentration",
-    "extract_convergence_features",
-    "ConvergenceDetector",
-    "BimodalityDetector",
     # Quality models
     "MeanQualityPredictor",
     "MedianQualityPredictor",
@@ -167,4 +125,10 @@ __all__ = [
     "QualityFilter",
     "QualityAwarePipeline",
     "ConditionalPipeline",
+    # Model agreement
+    "ModelAgreementAnalyzer",
+    "ConfidenceWeightedEnsemble",
+    # Deployable pipeline
+    "BoomDetectionPipeline",
+    "cv_pipeline",
 ]
