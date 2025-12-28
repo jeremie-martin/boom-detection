@@ -194,11 +194,51 @@ Tested pipeline: Quality filter → Frame detector (trained on high-quality)
   1. Nail easy cases: 8.2 → 5 frames (need fine-tuning)
   2. Handle hard cases differently (specialized model or abstention)
 
+## Phase 7: Feature Importance Analysis
+
+### Key Finding
+**Top 20-50 features outperform all 1365 for HistGBM, but not for CNN!**
+
+### Feature Ablation Results (HistGBM)
+
+| Features | Count | MAE | Within 10 |
+|----------|-------|-----|-----------|
+| All features | 1365 | 18.9 | 51% |
+| **Top 20** | 20 | **17.1** | **65%** |
+| Top 50 | 50 | 16.2 | 59% |
+| Top 100 | 100 | 16.4 | 61% |
+| Random 50 | 50 | 21.5 | 55% |
+
+### Feature Ablation Results (CNN)
+
+| Features | Count | MAE | Within 10 |
+|----------|-------|-----|-----------|
+| **All features** | 1365 | **15.7** | 51% |
+| Top 100 | 100 | 17.9 | 53% |
+| Top 50 | 50 | 20.4 | 55% |
+| Top 20 | 20 | 20.2 | 49% |
+
+### Interpretation
+- **HistGBM**: Benefits from feature selection. Excess features add noise.
+- **CNN**: Benefits from all features. Can learn to ignore irrelevant features through its filters.
+- Top features capture 97% of importance in just 50 features.
+- Random 50 features perform much worse, confirming top features are meaningful.
+
+### Most Important Features (Top 10)
+1. Feature 1298 (importance: 0.0083)
+2. Feature 662 (importance: 0.0026)
+3. Feature 616 (importance: 0.0023)
+4. Feature 1189 (importance: 0.0012)
+5. Feature 28 (importance: 0.0010)
+6. Feature 979 (importance: 0.0009)
+7. Feature 657 (importance: 0.0009)
+8. Feature 70 (importance: 0.0006)
+
 ## Next Steps
 
 1. **Confidence-weighted ensemble**: Learn optimal weights based on agreement
 2. **Three-model ensemble**: Add third model for median voting (more robust)
 3. **Local refinement**: Coarse prediction → fine-tune in ±20 frame window
 4. **Quality-stratified models**: Train separate models for high/low quality
-5. **Feature selection**: Focus on most predictive of 1365 features
+5. **Hyperparameter optimization**: Tune learning rate, depth, estimators
 6. **Attention mechanisms**: Let model focus on boom region
