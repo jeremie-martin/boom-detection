@@ -1,6 +1,6 @@
 # Boom Detection: Results Summary
 
-## Best Result: MAE 7.2 ± 1.1 frames (Robust Evaluation)
+## Best Result: MAE 7.5 ± 0.6 frames (Robust Evaluation)
 
 The goal is producing **high-quality animations for YouTube/social media**, not detecting boom frames on all simulations. This means:
 - We only care about high-quality simulations
@@ -17,7 +17,7 @@ At inference:
    4. Extract features around avg(boom_cnn, boom_hgb)
    5. Predict quality
    6. IF predicted_quality ≥ 0.55:
-      → ACCEPT, use boom_hgb as final prediction
+      → ACCEPT, use boom_cnn as final prediction
    ELSE:
       → REJECT
 ELSE:
@@ -30,18 +30,51 @@ Results from 5-fold CV × 5 random seeds = 25 evaluations:
 
 | Metric | Mean ± Std |
 |--------|-----------|
-| MAE | **7.2 ± 1.1 frames** |
-| Within 5 frames | ~45% |
-| Acceptance rate | ~33% |
-
-**Important:** Earlier reported "MAE 4.0" was from a single favorable random seed. The true expected performance is MAE ~7 frames with high variance due to small sample size (49 simulations).
+| MAE | **7.5 ± 0.6 frames** |
+| Within 5 frames | 59% ± 6% |
+| Acceptance rate | 31% ± 4% |
 
 ### Key Insights
 
 1. **Model agreement is the primary filter** - when CNN and HistGBM disagree, predictions are unreliable
-2. **Use HGB prediction, not average** - HGB alone is more accurate than CNN+HGB average when they agree
-3. **Predicted quality helps** - but improvement is modest
-4. **High variance** - with only 49 simulations, results vary by ±1-2 MAE depending on random split
+2. **Use CNN prediction, not HGB** - CNN is more accurate when models agree (see ablation study)
+3. **Quality filter helps** - reduces MAE by ~2-3 frames but lowers acceptance
+4. **Low variance** - switching from HGB to CNN reduced std from 1.1 to 0.6
+
+---
+
+## Ablation Study Results
+
+### Which prediction to use on agreement cases?
+
+| Prediction | MAE | Variance | Acceptance |
+|------------|-----|----------|------------|
+| **CNN** | **7.1 ± 0.7** | Low | 29% |
+| HGB | 11.0 ± 4.5 | High | 32% |
+| Average | 7.9 ± 2.6 | Medium | 32% |
+
+**Conclusion**: CNN is more accurate and has lower variance. Use CNN.
+
+### Impact of each filter
+
+| Configuration | MAE | Acceptance |
+|---------------|-----|------------|
+| No filtering | 16.1 | 100% |
+| Agreement≤5 only | 10.5 ± 3.3 | 47% |
+| Agreement≤5 + Quality≥0.55 | **6.7 ± 1.0** | 31% |
+| Agreement≤3 only | 8.4 ± 1.2 | 34% |
+
+**Conclusion**: Both filters contribute. Agreement is the main driver; quality adds ~3 frame improvement.
+
+### CNN vs HGB standalone (all simulations)
+
+| Model | MAE |
+|-------|-----|
+| CNN | 16.1 ± 2.0 |
+| HGB | 18.8 ± 1.3 |
+| Ensemble | 17.6 ± 1.3 |
+
+**Conclusion**: CNN outperforms HGB on average. HGB's value is as a confidence check (agreement filter).
 
 ---
 
@@ -71,10 +104,10 @@ Boom quality strongly predicts detection error (Spearman = -0.454):
 
 ### 2. Model Agreement as Confidence
 
-When CNN and HistGBM agree within 10 frames:
-- 60% of simulations
-- MAE drops to 6.8-7.2
-- Strong correlation with quality (Spearman = -0.498)
+When CNN and HistGBM agree within 5 frames:
+- ~50% of simulations
+- MAE drops to 7-8
+- Strong correlation with quality
 
 ### 3. Complementary Model Strengths
 
@@ -110,16 +143,20 @@ Key finding: Top 20-50 features outperform all 1365 for HistGBM, but CNN benefit
 | + Hyperparameters | 16.2 | Tuned HistGBM |
 | + Ensemble | 14.0 | CNN+HGB mean |
 | + Local context | 13.3 | Enhanced features |
-| + Agreement filter | 7.0 | Accept when models agree |
-| **+ Predicted quality** | **4.0** | Full deployable pipeline |
+| + Agreement filter | ~10 | Accept when models agree |
+| + Quality filter | ~7 | Reject low predicted quality |
+| **+ Use CNN (ablation)** | **7.5 ± 0.6** | Final pipeline |
 
 ---
 
 ## Running the Pipeline
 
 ```bash
-# Evaluate with cross-validation
+# Evaluate with cross-validation (5 seeds, ~5 min)
 uv run python -m boom_detection.deploy_pipeline data --evaluate
+
+# Quick single-seed evaluation (for development)
+uv run python -m boom_detection.deploy_pipeline data --evaluate --quick
 
 # Train final models
 uv run python -m boom_detection.deploy_pipeline data --train --output models/

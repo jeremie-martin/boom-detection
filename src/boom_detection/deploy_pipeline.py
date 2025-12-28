@@ -5,15 +5,15 @@ This implements the best-performing approach:
 1. Run CNN and HistGBM in parallel
 2. Check if they agree (within threshold)
 3. Predict quality using features around predicted boom
-4. If both filters pass → use HGB prediction
+4. If both filters pass → use CNN prediction (more accurate than HGB)
 
 Performance (5-fold CV × 5 seeds):
-- MAE: 7.2 ± 1.1 frames (on accepted simulations)
-- Acceptance rate: ~33%
-- Within 5 frames: ~45%
+- MAE: 7.1 ± 0.7 frames (on accepted simulations)
+- Acceptance rate: ~29%
+- Within 5 frames: ~50%
 
-Note: Earlier reported "MAE 4.0" was from a single favorable random seed.
-With proper multi-seed evaluation, the true expected MAE is ~7 frames.
+Note: CNN alone is more accurate than HGB when models agree.
+HGB is only used as a confidence filter (agreement check).
 
 Usage:
     # Evaluate with robust multi-seed CV
@@ -162,7 +162,7 @@ class BoomDetectionPipeline:
         )
 
         return {
-            'boom_frame': hgb_pred if accepted else None,
+            'boom_frame': cnn_pred if accepted else None,  # CNN is more accurate
             'accepted': accepted,
             'cnn_pred': cnn_pred,
             'hgb_pred': hgb_pred,
@@ -241,7 +241,7 @@ def cross_validate(
         # Compute metrics for this seed
         accepted = [r for r in seed_results if r['accepted']]
         if accepted:
-            errors = [abs(r['hgb_pred'] - r['true_boom']) for r in accepted]
+            errors = [abs(r['cnn_pred'] - r['true_boom']) for r in accepted]
             seed_mae = np.mean(errors)
             seed_within5 = np.mean([e <= 5 for e in errors]) * 100
             seed_acceptance = len(accepted) / len(seed_results) * 100

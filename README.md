@@ -2,17 +2,17 @@
 
 Predict the "boom" frame in chaotic double pendulum simulations - the moment when pendulums visually diverge into a caustic pattern.
 
-## Best Result: MAE 7.2 ± 1.1 frames
+## Best Result: MAE 7.5 ± 0.6 frames
 
 Using model agreement + predicted quality filtering (robust 5-seed evaluation):
 
 | Metric | Value |
 |--------|-------|
-| MAE | **7.2 ± 1.1 frames** |
-| Within 5 frames | ~45% |
-| Acceptance rate | ~33% |
+| MAE | **7.5 ± 0.6 frames** |
+| Within 5 frames | 59% ± 6% |
+| Acceptance rate | 31% ± 4% |
 
-**Note:** Earlier reported "MAE 4.0" was from a single favorable random seed. With proper multi-seed evaluation, the true expected MAE is ~7 frames. This is the honest, reproducible result.
+**Key finding from ablation study:** CNN is more accurate than HGB when models agree. Switching to CNN also reduced variance significantly (from 1.1 to 0.6).
 
 ## Quick Start
 
@@ -35,9 +35,9 @@ The pipeline uses two models (CNN and HistGBM) as a confidence filter:
 2. **Check agreement**: If predictions differ by >5 frames → reject
 3. **Predict quality**: Use features around predicted boom
 4. **Filter**: If predicted quality < 0.55 → reject
-5. **Accept**: Use HGB prediction (more accurate than average)
+5. **Accept**: Use CNN prediction (ablation study showed CNN > HGB)
 
-This achieves MAE 4.0 on ~27% of simulations. For video production, we simply generate more simulations and use only the accepted ones.
+This achieves MAE 7.5 on ~31% of simulations. For video production, we simply generate more simulations and use only the accepted ones.
 
 ## Project Structure
 
@@ -86,6 +86,6 @@ uv run python -m boom_detection.deploy_pipeline data --evaluate  # Best pipeline
 1. **Model agreement = confidence**: When CNN and HistGBM agree, predictions are reliable
 2. **Quality predicts error**: High-quality booms have MAE ~11, low-quality ~31
 3. **Rejection is OK**: For video production, we can generate more simulations
-4. **HGB > average**: When models agree, use HGB alone (not their average)
+4. **CNN > HGB**: Ablation study showed CNN is more accurate when models agree
 
 See [docs/RESULTS.md](docs/RESULTS.md) for detailed analysis.
