@@ -99,9 +99,9 @@ class TestSpecializedFeatures:
         assert result.shape == (100, 6)
 
     def test_caustic_features_shape(self, sample_simulation_data):
-        """Caustic features should have shape (frames, 4)."""
+        """Caustic features should have shape (frames, 9)."""
         result = caustic_features(sample_simulation_data)
-        assert result.shape == (100, 4)
+        assert result.shape == (100, 9)  # 6 legacy + 3 coverage-only
 
 
 class TestTemporalDerivatives:

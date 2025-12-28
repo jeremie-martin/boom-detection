@@ -553,6 +553,9 @@ class FeatureConfig:
     include_velocity: bool = True
     include_caustic: bool = False  # caustic/angular distribution features
     caustic_bins: int = 36  # number of angular bins (36 = 10° bins)
+    # Specific caustic features to include (if include_caustic=True)
+    # None = all features, or specify subset like ['joint_concentration']
+    caustic_subset: tuple[str, ...] | None = None
     include_derivatives: bool = True
     derivative_orders: tuple[int, ...] = (1, 2)
     # Subsampling for speed and resolution invariance testing
@@ -569,11 +572,12 @@ class FeatureConfig:
 # Default configuration (without caustic features for backwards compatibility)
 DEFAULT_CONFIG = FeatureConfig()
 
-# Production configuration with caustic features enabled
-# Use this for deployment - caustic features improve accuracy ~0.3-0.5 MAE
+# Production configuration - optimized for full pipeline
+# Note: Caustic features help HGB but hurt the full pipeline (CNN is sensitive)
+# Testing shows: No caustic → Selective MAE 5.92 vs All caustic → 6.26
 PRODUCTION_CONFIG = FeatureConfig(
     max_pendulums=2000,
-    include_caustic=True,
+    include_caustic=False,  # Disabled: helps HGB but hurts full pipeline
 )
 
 # Enhanced configuration with temporal features (Phase 2)
@@ -656,11 +660,18 @@ class FeatureExtractor:
             base_groups.append('angular_spread')
         if cfg.include_velocity:
             base_groups.append('velocity')
-        if cfg.include_caustic:
-            base_groups.append('caustic')
 
         for group in base_groups:
             names.extend(FEATURE_GROUPS[group])
+
+        # Handle caustic features with optional subset
+        if cfg.include_caustic:
+            if cfg.caustic_subset is not None:
+                # Only include specified caustic features
+                names.extend(list(cfg.caustic_subset))
+            else:
+                # Include all caustic features
+                names.extend(FEATURE_GROUPS['caustic'])
 
         if cfg.include_derivatives:
             base_names = names.copy()
@@ -732,7 +743,14 @@ class FeatureExtractor:
         if cfg.include_velocity:
             features_list.append(velocity_features(data))
         if cfg.include_caustic:
-            features_list.append(caustic_features(data, cfg.caustic_bins))
+            all_caustic = caustic_features(data, cfg.caustic_bins)
+            if cfg.caustic_subset is not None:
+                # Only keep specified caustic features
+                all_caustic_names = FEATURE_GROUPS['caustic']
+                indices = [all_caustic_names.index(n) for n in cfg.caustic_subset]
+                features_list.append(all_caustic[:, indices])
+            else:
+                features_list.append(all_caustic)
 
         # Combine base features
         base_features = np.hstack(features_list)

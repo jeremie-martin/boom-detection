@@ -96,12 +96,44 @@ High correlations (r > 0.99) indicate redundant features:
 | range_w2 ↔ range_abs_w2 | 0.991 |
 | var_x1 ↔ iqr_x1 | 0.991 |
 
+## Full Pipeline Evaluation Results
+
+Comprehensive testing revealed a critical insight: **Caustic features help HGB but hurt the full pipeline**.
+
+### HGB Classifier Results (single-seed)
+
+| Configuration | Features | MAE | Change |
+|---------------|----------|-----|--------|
+| No caustic | 183 | 22.93 | baseline |
+| Joint only | 186 | 22.48 | +2.0% better |
+| All caustic (9) | 210 | **22.37** | **+2.4% better** |
+
+### Full Pipeline Results (single-seed)
+
+| Configuration | Features | Selective MAE | Coverage |
+|---------------|----------|---------------|----------|
+| **No caustic** | 183 | **5.92** | **40.0%** |
+| Joint only | 186 | 6.53 | 42.2% |
+| All caustic (9) | 210 | 6.26 | 34.4% |
+
+### Analysis
+
+The discrepancy occurs because:
+1. **CNN is sensitive to input dimensions** - Adding features hurts the sequence model
+2. **Quality prediction changes** - Different features affect acceptance decisions
+3. **Model agreement shifts** - CNN/HGB agreement (used for confidence) changes
+
+### Key Insight
+
+While `joint_concentration` ranks #1 in HGB feature importance, the full pipeline performs best **without** caustic features because the CNN component is negatively affected.
+
 ## Recommendations
 
-1. **Use coverage-based features**: `tip_coverage` is the best single predictor
-2. **Focus on theta features**: th1 and th2 statistics dominate importance
-3. **Consider feature reduction**: Many features are highly correlated
-4. **Test with pipeline**: Full pipeline evaluation needed to confirm improvements
+1. **For full pipeline (production)**: Use `include_caustic=False` - best selective MAE
+2. **For HGB-only use cases**: Use `include_caustic=True` with all features
+3. **For experimentation**: Use `caustic_subset` parameter to test specific features
+4. **Focus on theta features**: th1 and th2 statistics dominate importance
+5. **Consider feature reduction**: Many features are highly correlated
 
 ## Files
 
