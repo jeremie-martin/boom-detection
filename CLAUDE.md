@@ -11,10 +11,15 @@ This means:
 - Rejecting low-quality simulations is acceptable (can generate more)
 - For accepted simulations, we want accurate boom detection
 
-**Current best (90 simulations, 5-seed evaluation)**:
-- Default (linear/10): MAE 8.5 ± 1.9 frames at 39% coverage
-- Balanced (sqrt/15): MAE 6.7 ± 2.1 frames at 29% coverage
-- Most selective (sqrt/5): MAE 3.9 ± 0.6 frames at 13% coverage
+**Current best (90 simulations, 3-seed evaluation)**:
+- Default (linear/10): MAE 7.3 ± 1.7 frames at 39% coverage
+- Balanced (sqrt/15): MAE 4.9 ± 1.3 frames at 30% coverage
+- Most selective (sqrt/5): MAE 3.4 ± 0.8 frames at 14% coverage
+
+**Key findings from comprehensive evaluation (Dec 2025)**:
+- HGB alone: MAE 22.5 ± 0.6 frames (37% within 5 frames)
+- Caustic features do NOT improve the pipeline (no_caustic baseline is best)
+- For HGB alone, entropy formula is slightly better (-0.5 MAE) but doesn't transfer to pipeline
 
 **Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
@@ -216,8 +221,12 @@ result = evaluate(dataset, cache)
 
 1. **Model agreement is the best confidence signal** - better than quality prediction alone
 2. **Use CNN, not HGB or average** - CNN is more accurate and has lower variance
-3. **Sqrt agreement formula with scale=15 is a good balance** - MAE 6.7 at 29% coverage
+3. **Sqrt agreement formula with scale=15 is a good balance** - MAE 4.9 at 30% coverage
 4. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
-5. **Frame-level HistGBM classifier is best baseline** - MAE 23.3±1.8 at 54% within-10
+5. **Frame-level HistGBM classifier is best baseline** - MAE 22.5±0.6 at 37% within-5
+6. **Caustic features do NOT improve the pipeline** - all 5 tested formulas performed worse than no_caustic baseline
+7. **Entropy formula slightly helps HGB alone** (-0.5 MAE) but doesn't translate to pipeline improvement
 
-See experiment scripts in `scripts/` for detailed results.
+See experiment scripts in `scripts/` for detailed results:
+- `scripts/comprehensive_evaluation.py` - Full evaluation with caustic formula comparison
+- `scripts/evaluate_caustic_formulas.py` - Focused caustic formula analysis
