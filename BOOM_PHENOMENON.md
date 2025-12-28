@@ -266,10 +266,59 @@ Tested pipeline: Quality filter → Frame detector (trained on high-quality)
 | High (≥0.5) | 8.8 | 10.8 |
 | Low (<0.5) | 23.4 | 24.6 |
 
+## Phase 9: Ensemble Methods Deep Dive
+
+### Individual Model Performance
+
+| Model | MAE | MedAE | Within 10 |
+|-------|-----|-------|-----------|
+| CNN | 16.6 | 8.0 | 59% |
+| HistGBM | 15.9 | 8.0 | 61% |
+| Logistic | 20.1 | 9.0 | 55% |
+
+### Ensemble Results
+
+| Method | MAE | MedAE | Within 10 | Within 5 |
+|--------|-----|-------|-----------|----------|
+| **Mean (CNN+HGB)** | **14.0** | **7.5** | **61%** | 39% |
+| Median 3-model | 16.2 | 8.0 | 65% | 41% |
+| Weighted (CNN=0.5) | 14.0 | 7.5 | 61% | 39% |
+| Oracle (best model) | 9.9 | 4.0 | 73% | 55% |
+
+### Agreement Analysis (CNN + HistGBM)
+
+| Condition | n | MAE (Avg) | Notes |
+|-----------|---|-----------|-------|
+| Agree (≤10 frames) | 30 (61%) | **7.2** | Close to goal! |
+| Disagree (>10 frames) | 19 (39%) | 30.7 | Main problem |
+
+**Key insight**: When CNN and HistGBM agree, ensemble achieves MAE 7.2 - very close to our goal of <5. The disagreement cases are dragging overall MAE up.
+
+### Disagreement Case Analysis
+
+When models disagree (n=19):
+- CNN MAE: 30.7
+- HGB MAE: 29.3
+- Average MAE: 24.7
+- Using HGB for disagreement: slightly better
+
+### Oracle Analysis
+
+- If we could perfectly pick the better model: MAE 9.9
+- CNN is better 51% of cases, HGB is better 49%
+- 6 simulations have error >20 for ALL models (hardest cases, mostly low quality)
+- 12 simulations have error ≤5 for ALL models (easiest cases)
+
+### Path to MAE < 5
+
+1. **Agreement cases (61%)**: 7.2 → 5 (need ~30% improvement)
+2. **Disagreement cases (39%)**: 30 → 10 (need specialized handling)
+3. **Alternative**: Increase agreement rate from 61% to 80%+
+
 ## Next Steps
 
-1. **Smart ensemble**: Combine CNN + HistGBM with confidence weighting
-2. **Local refinement**: Fine-tune predictions in ±20 frame window
-3. **Three-model ensemble**: Add third model for median voting
-4. **Attention mechanisms**: Let CNN focus on boom region
-5. **Multi-task learning**: Predict frame + quality jointly
+1. **New feature engineering**: Add temporal derivatives, convergence features
+2. **Error analysis**: Understand the 6 hardest cases in detail
+3. **Attention mechanisms**: Let CNN focus on boom region
+4. **Multi-task learning**: Predict frame + quality jointly
+5. **Alternative formulations**: Regression vs classification
