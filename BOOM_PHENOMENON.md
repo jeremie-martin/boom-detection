@@ -315,10 +315,66 @@ When models disagree (n=19):
 2. **Disagreement cases (39%)**: 30 → 10 (need specialized handling)
 3. **Alternative**: Increase agreement rate from 61% to 80%+
 
+## Phase 10: New Feature Engineering
+
+### Local Context Features
+
+Added rolling statistics showing local anomalies:
+- For each frame, compute difference from rolling mean (windows: 5, 10, 20)
+- This captures "how unusual is this frame compared to recent frames"
+
+### Results with Enhanced Features
+
+| Model | Features | MAE | MedAE | Within 10 | Within 5 |
+|-------|----------|-----|-------|-----------|----------|
+| HistGBM | Top 50 (baseline) | 15.9 | 8.0 | 61% | 39% |
+| **HistGBM** | **Top 50 + Context** | **13.9** | **7.0** | **61%** | 45% |
+| CNN | Full 1365 | 14.7 | 8.0 | 59% | 39% |
+
+### Optimal Ensemble
+
+Use different features for different models:
+- CNN: Full 1365 features (benefits from more features)
+- HistGBM: Top 50 + Local Context (74 features, benefits from selection)
+
+**Best Result: Mean(CNN+HGB) = MAE 13.3**
+
+| Method | MAE | MedAE | Within 10 | Within 5 |
+|--------|-----|-------|-----------|----------|
+| CNN (full) | 14.7 | 8.0 | 59% | 39% |
+| HistGBM (enhanced) | 13.9 | 7.0 | 61% | 45% |
+| **Mean (CNN+HGB)** | **13.3** | **7.5** | **59%** | - |
+| Agreement-10 (Avg\|HGB) | 13.7 | **5.0** | 61% | **51%** |
+
+### Agreement Analysis (Threshold=10)
+
+| Condition | n | MAE | Notes |
+|-----------|---|-----|-------|
+| Agree (≤10 frames) | 26 (53%) | **6.8** | Close to goal! |
+| Disagree (>10 frames) | 23 (47%) | 21.4 | Main problem |
+
+### By Quality
+
+| Model | High-Q MAE | Low-Q MAE |
+|-------|-----------|-----------|
+| CNN | **8.5** | 24.4 |
+| HGB | 11.2 | **18.2** |
+| Mean | 9.6 | 19.1 |
+
+**Key insight**: CNN excels on high-quality (MAE 8.5), HGB on low-quality (MAE 18.2).
+
+## Progress Summary
+
+| Phase | Best MAE | Key Finding |
+|-------|----------|-------------|
+| Baseline | 18.9 | HistGBM frame classifier |
+| Phase 3 | 16.2 | Hyperparameter optimization |
+| Phase 4 | 14.0 | CNN+HGB ensemble |
+| **Phase 5** | **13.3** | Local context features + optimal ensemble |
+
 ## Next Steps
 
-1. **New feature engineering**: Add temporal derivatives, convergence features
-2. **Error analysis**: Understand the 6 hardest cases in detail
+1. **Error analysis**: Understand the 23 disagreement cases in detail
+2. **Alternative formulations**: Regression vs classification
 3. **Attention mechanisms**: Let CNN focus on boom region
 4. **Multi-task learning**: Predict frame + quality jointly
-5. **Alternative formulations**: Regression vs classification
