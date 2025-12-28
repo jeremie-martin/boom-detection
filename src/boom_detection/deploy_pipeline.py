@@ -550,7 +550,7 @@ class BoomDetectionPipeline:
             raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
 
         simulation = load_simulation(simulation_path)
-        return self.predict_simulation(simulation)
+        return self.predict_simulation(simulation.data)
 
 
 def cross_validate(
