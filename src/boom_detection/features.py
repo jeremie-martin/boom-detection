@@ -625,6 +625,24 @@ class FeatureExtractor:
             for order in cfg.derivative_orders:
                 names.extend([f"d{order}_{n}" for n in base_names])
 
+        # Enhanced temporal features - must match transform() order
+        base_feature_names = names.copy()
+
+        if cfg.include_rolling:
+            for window in cfg.rolling_windows:
+                # rolling_features returns [mean, std] for each base feature
+                names.extend([f"roll{window}_mean:{n}" for n in base_feature_names])
+                names.extend([f"roll{window}_std:{n}" for n in base_feature_names])
+
+        if cfg.include_lag:
+            for lag in cfg.lag_steps:
+                names.extend([f"lag{lag}:{n}" for n in base_feature_names])
+
+        if cfg.include_relative:
+            # relative_features returns [ratio_to_max, pct_rank] for each base feature
+            names.extend([f"ratio_to_max:{n}" for n in base_feature_names])
+            names.extend([f"pct_rank:{n}" for n in base_feature_names])
+
         return names
 
     def transform(self, simulation: Simulation) -> np.ndarray:
@@ -786,12 +804,64 @@ class FeatureCache:
         self.extractor = FeatureExtractor(config)
         self._cache: dict[str, np.ndarray] = {}
         self._id_to_sim: dict[str, 'Simulation'] = {}
+        self._name_to_idx: dict[str, int] | None = None  # Lazy-built index map
 
         # Create cache directory if specified
         if cache_dir:
             import os
             os.makedirs(cache_dir, exist_ok=True)
             self._config_hash = self._compute_config_hash()
+
+    @property
+    def feature_names(self) -> list[str]:
+        """Get list of all feature names."""
+        return self.extractor.feature_names
+
+    def index(self, name: str) -> int:
+        """
+        Get the column index for a feature by name.
+
+        Use this instead of hard-coded indices to ensure code is robust
+        to feature configuration changes.
+
+        Args:
+            name: Feature name (e.g., 'var_x2', 'var_y2', 'tip_spread')
+
+        Returns:
+            Column index into feature array
+
+        Raises:
+            KeyError: If feature name not found
+
+        Example:
+            tip_spread_idx = cache.index('tip_spread')
+            features[:, tip_spread_idx]  # Access tip spread feature
+        """
+        if self._name_to_idx is None:
+            self._name_to_idx = {n: i for i, n in enumerate(self.feature_names)}
+
+        if name not in self._name_to_idx:
+            raise KeyError(
+                f"Feature '{name}' not found. "
+                f"Available features: {', '.join(self.feature_names[:10])}..."
+            )
+        return self._name_to_idx[name]
+
+    def indices(self, *names: str) -> list[int]:
+        """
+        Get column indices for multiple features by name.
+
+        Args:
+            *names: Feature names
+
+        Returns:
+            List of column indices
+
+        Example:
+            var_indices = cache.indices('var_x2', 'var_y2')
+            tip_variance = features[:, var_indices].sum(axis=1)
+        """
+        return [self.index(n) for n in names]
 
     def _compute_config_hash(self) -> str:
         """Compute a hash of the config to detect changes."""
@@ -1000,7 +1070,3 @@ class FeatureCache:
 
     def __len__(self) -> int:
         return len(self._cache)
-
-    @property
-    def feature_names(self) -> list[str]:
-        return self.extractor.feature_names
