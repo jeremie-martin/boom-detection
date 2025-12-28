@@ -1,3 +1,25 @@
+# Boom Detection Project
+
+## Project Goal (Clarified)
+
+**The goal is NOT to accurately detect boom frames on ALL simulations.**
+
+The actual goal is: **Produce high-quality animations with accurate boom detection for YouTube/social media.**
+
+Implications:
+- We only care about HIGH-QUALITY simulations (quality >= 0.5 or higher)
+- Rejecting low-quality simulations is acceptable (we can generate more)
+- False positives in rejection (accidentally rejecting some good ones) are tolerable
+- For simulations we ACCEPT, we need MAE close to 5 frames
+
+**Best current approach**: Model agreement filter
+- Run both CNN and HistGBM
+- If they agree (within 10 frames): Accept, use average prediction (MAE ~7)
+- If they disagree: Reject the simulation
+- This accepts ~60% of simulations (mostly high-quality ones)
+
+---
+
 ## Experimental Findings
 
 ### What Works
@@ -318,9 +340,25 @@ Route predictions based on predicted quality:
 
 **Progress: 18.9 → 11.8 (37% improvement)**
 
-## Next Steps
+## Next Steps (Updated with Clarified Goal)
 
-1. **Attention mechanisms**: Let CNN focus on boom region
-2. **Multi-task learning**: Predict frame + quality jointly
-3. **Improve quality prediction**: Better routing = lower error
-4. **Synthesis**: Combine all best techniques
+Given the clarified goal (high-quality videos, not universal accuracy), our focus is:
+
+### High Priority
+1. **Validate agreement-based pipeline**: Confirm MAE ~7 on agreement cases is robust
+2. **Optimize agreement cases**: Push MAE from 7 to <5 (tighter threshold, weighted average, refinement)
+3. **Analyze quality distribution**: What % of high-quality sims are in agreement group?
+
+### Medium Priority
+4. **Combine agreement + quality**: Use both signals to increase confidence
+5. **Verify quality routing**: Confirm MAE 11.8 result, check for data leakage
+
+### Lower Priority (defer unless needed)
+6. **Advanced architectures**: Attention CNN, Transformer (current models work well)
+7. **Multi-task learning**: Predict frame + quality jointly
+8. **Additional features**: Already have 1365 features, diminishing returns
+
+### Success Metrics
+- For accepted simulations: MAE < 5 frames
+- Acceptance rate: ~60-80% (reject low-quality/uncertain)
+- High-quality acceptance: >=80% of Q>=0.5 sims should be accepted

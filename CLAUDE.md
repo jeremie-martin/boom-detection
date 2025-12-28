@@ -1,12 +1,26 @@
 # Claude Context
 
+## Project Goal
+
+**The goal is NOT to accurately detect boom frames on ALL simulations.**
+
+The actual goal is: **Produce high-quality animations with accurate boom detection for YouTube/social media.**
+
+This means:
+- We only care about HIGH-QUALITY simulations (quality >= 0.5 or higher)
+- Rejecting low-quality simulations is acceptable (we can generate more)
+- For simulations we ACCEPT, we need MAE close to 5 frames
+
 ## What This Is
 
 Predict the "boom" frame in double pendulum simulations. See README.md for full context.
 
-**Current best**: CNN at MAE 17.1 frames (target: <5)
+**Current best approach**: Model agreement filter
+- When CNN and HistGBM agree (within 10 frames): **MAE 6.8-7.2** (close to target!)
+- Accept ~60% of simulations (mostly high-quality)
+- This is deployable at inference time
 
-**Key finding**: Boom quality strongly predicts error. High-quality booms have MAE ~11, low-quality ~31.
+**Key finding**: Model agreement is a powerful confidence indicator, correlated with quality (Spearman -0.498).
 
 ## What is the Boom?
 
