@@ -8,6 +8,8 @@ Usage:
 
 This validates the evaluation framework and establishes baseline performance.
 Results are reported with proper uncertainty estimates (mean ± std).
+
+Uses the unified CachedEvaluator for consistent evaluation across the codebase.
 """
 
 from __future__ import annotations
@@ -16,8 +18,8 @@ import time
 
 import numpy as np
 
-from .loader import load_dataset, Dataset
-from .evaluation import compute_all_metrics
+from .loader import load_dataset
+from .evaluation import CachedEvaluator
 from .features import FeatureCache, FeatureConfig
 from .frame_models import get_frame_level_predictors
 
@@ -29,7 +31,7 @@ from .frame_models import get_frame_level_predictors
 class MeanPredictor:
     """Predicts the mean of training targets."""
 
-    def __init__(self, cache: FeatureCache | None = None):
+    def __init__(self):
         self.mean_value = 0.0
 
     def fit(self, ids: list[str], y: np.ndarray, cache: FeatureCache) -> None:
@@ -193,163 +195,8 @@ class LinearRegressionPredictor:
 
 
 # =============================================================================
-# Fast Evaluation (no dataset loading needed)
+# Baseline Registry
 # =============================================================================
-
-def quick_cv(
-    predictor_fn,
-    cache: FeatureCache,
-    data_path: str = 'data',
-    k: int = 5,
-    seeds: list[int] | None = None,
-    task: str = 'frame',
-    quality_threshold: float | None = None,
-) -> dict:
-    """
-    Run robust multi-seed CV using only cached features.
-
-    This is the fastest way to iterate: ~0.2s to load features vs ~30s for full dataset.
-    Uses multiple seeds by default for proper uncertainty estimates.
-
-    Args:
-        predictor_fn: Factory function returning a fresh predictor
-                     Example: lambda: FrameLevelClassifier(max_depth=7)
-        cache: FeatureCache with disk caching enabled
-        data_path: Path to data directory (for annotations.json)
-        k: Number of CV folds
-        seeds: Random seeds (default: [42, 43, 44] for quick, or [42] for --quick)
-        task: 'frame' for boom frame prediction, 'quality' for boom quality prediction
-        quality_threshold: If set, filter to simulations with quality >= threshold
-
-    Returns:
-        Dict with mean_metrics, std_metrics, and per-seed results
-    """
-    from sklearn.model_selection import KFold
-    from .loader import load_annotations
-    import os
-
-    if seeds is None:
-        seeds = [42, 43, 44]  # 3 seeds by default for quick iteration
-
-    # Load just the annotations (tiny file, instant)
-    if os.path.isdir(data_path):
-        ann_path = os.path.join(data_path, 'annotations.json')
-    else:
-        ann_path = data_path
-    annotations = load_annotations(ann_path)
-
-    # Load features from disk cache
-    sim_ids = [a.id for a in annotations]
-    cache.load_from_disk(sim_ids, verbose=False)
-
-    # Filter to only simulations we have cached
-    available = [a for a in annotations if a.id in cache]
-    if len(available) < len(annotations):
-        print(f"Warning: Only {len(available)}/{len(annotations)} simulations cached")
-    annotations = available
-
-    # Filter by quality if requested
-    if quality_threshold is not None:
-        annotations = [a for a in annotations if a.boom_quality >= quality_threshold]
-        print(f"Filtered to {len(annotations)} simulations with quality >= {quality_threshold}")
-
-    ids = [a.id for a in annotations]
-
-    # Select targets based on task
-    if task == 'quality':
-        targets = np.array([a.boom_quality for a in annotations])
-    else:
-        targets = np.array([a.boom_frame for a in annotations])
-
-    # Run CV with multiple seeds
-    all_seed_metrics = []
-
-    for seed in seeds:
-        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
-        all_preds = np.zeros(len(ids))
-
-        for train_idx, test_idx in kf.split(ids):
-            train_ids = [ids[i] for i in train_idx]
-            test_ids = [ids[i] for i in test_idx]
-            train_y = targets[train_idx]
-
-            predictor = predictor_fn()  # Fresh predictor each fold
-            predictor.fit(train_ids, train_y, cache)
-            preds = predictor.predict(test_ids, cache)
-            all_preds[test_idx] = preds
-
-        metrics = compute_all_metrics(targets, all_preds, task=task)
-        all_seed_metrics.append(metrics)
-
-    # Aggregate across seeds
-    metric_names = list(all_seed_metrics[0].keys())
-    mean_metrics = {}
-    std_metrics = {}
-
-    for name in metric_names:
-        values = [m[name] for m in all_seed_metrics]
-        mean_metrics[name] = float(np.mean(values))
-        std_metrics[name] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
-
-    return {
-        'mean_metrics': mean_metrics,
-        'std_metrics': std_metrics,
-        'seed_metrics': all_seed_metrics,
-        'n_seeds': len(seeds),
-    }
-
-
-# =============================================================================
-# Evaluation with caching
-# =============================================================================
-
-def cross_validate_cached(
-    dataset: Dataset,
-    cache: FeatureCache,
-    predictor,
-    k: int = 5,
-    seed: int = 42,
-    task: str = "frame",
-) -> dict:
-    """
-    Run k-fold CV using cached features.
-
-    Args:
-        dataset: Dataset with annotations
-        cache: FeatureCache with extracted features
-        predictor: Predictor instance
-        k: Number of CV folds
-        seed: Random seed for reproducibility
-        task: 'frame' or 'quality'
-    """
-    from sklearn.model_selection import KFold
-
-    ids = [a.id for a in dataset.annotations]
-    if task == "frame":
-        targets = np.array([a.boom_frame for a in dataset.annotations])
-    else:
-        targets = np.array([a.boom_quality for a in dataset.annotations])
-
-    kf = KFold(n_splits=k, shuffle=True, random_state=seed)
-
-    all_preds = np.zeros(len(ids))
-    all_gt = targets.copy()
-
-    for train_idx, test_idx in kf.split(ids):
-        train_ids = [ids[i] for i in train_idx]
-        test_ids = [ids[i] for i in test_idx]
-        train_y = targets[train_idx]
-
-        predictor.fit(train_ids, train_y, cache)
-        preds = predictor.predict(test_ids, cache)
-        all_preds[test_idx] = preds
-
-    return {
-        'predictions': all_preds,
-        'ground_truth': all_gt,
-        'metrics': compute_all_metrics(all_gt, all_preds, task=task),
-    }
-
 
 def get_baselines(include_frame_level: bool = True) -> dict[str, callable]:
     """
@@ -376,6 +223,10 @@ def get_baselines(include_frame_level: bool = True) -> dict[str, callable]:
     return baselines
 
 
+# =============================================================================
+# Main Evaluation
+# =============================================================================
+
 def run_baselines(
     data_path: str,
     k: int = 5,
@@ -383,7 +234,16 @@ def run_baselines(
     max_samples: int | None = None,
     max_pendulums: int | None = 2000,
 ):
-    """Run all baselines and print comparison with proper uncertainty."""
+    """
+    Run all baselines using the unified CachedEvaluator framework.
+
+    Args:
+        data_path: Path to data directory
+        k: Number of CV folds
+        seeds: Random seeds for robust evaluation
+        max_samples: Limit number of samples (for quick testing)
+        max_pendulums: Subsample pendulums per simulation
+    """
     if seeds is None:
         seeds = [42, 43, 44]  # 3 seeds for reasonable speed/robustness tradeoff
 
@@ -409,6 +269,9 @@ def run_baselines(
     print(f"Feature extraction: {time.time() - t0:.1f}s ({n_features} features)")
     print()
 
+    # Create unified evaluator
+    evaluator = CachedEvaluator(dataset, cache)
+
     # Run baselines with multi-seed CV
     baselines = get_baselines()
     results = {}
@@ -419,29 +282,23 @@ def run_baselines(
     for name, predictor_factory in baselines.items():
         t0 = time.time()
         try:
-            # Run multi-seed CV
-            all_metrics = []
-            for seed in seeds:
-                result = cross_validate_cached(dataset, cache, predictor_factory(), k=k, seed=seed)
-                all_metrics.append(result['metrics'])
-
-            # Aggregate
-            mean_metrics = {}
-            std_metrics = {}
-            for metric_name in all_metrics[0].keys():
-                values = [m[metric_name] for m in all_metrics]
-                mean_metrics[metric_name] = np.mean(values)
-                std_metrics[metric_name] = np.std(values, ddof=1) if len(values) > 1 else 0.0
+            # Use unified CachedEvaluator
+            result = evaluator.cross_validate(
+                predictor_factory,
+                k=k,
+                seeds=seeds,
+                verbose=False,
+            )
 
             results[name] = {
-                'mean_metrics': mean_metrics,
-                'std_metrics': std_metrics,
+                'mean_metrics': result.mean_metrics,
+                'std_metrics': result.std_metrics,
             }
 
             elapsed = time.time() - t0
-            mae_mean = mean_metrics['mae']
-            mae_std = std_metrics['mae']
-            w10_mean = mean_metrics['within_10']
+            mae_mean = result.mean_metrics['mae']
+            mae_std = result.std_metrics['mae']
+            w10_mean = result.mean_metrics['within_10']
             print(f"{name:<25} MAE={mae_mean:>5.1f}±{mae_std:>4.1f}  within_10={w10_mean:>5.0%}  ({elapsed:.1f}s)")
 
         except Exception as e:

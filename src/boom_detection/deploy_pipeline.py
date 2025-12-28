@@ -43,6 +43,7 @@ from sklearn.model_selection import KFold
 
 from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
+from .evaluation import SelectivePrediction, compute_selective_metrics
 from .sequence_models import CNNClassifier, SequenceTrainer
 
 
@@ -232,7 +233,7 @@ def cross_validate(
     verbose: bool = True,
 ) -> dict:
     """
-    Run robust multi-seed cross-validation.
+    Run robust multi-seed cross-validation using the unified evaluation framework.
 
     Args:
         sim_ids: List of simulation IDs
@@ -251,22 +252,22 @@ def cross_validate(
     if seeds is None:
         seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
 
-    all_seed_results = []
+    all_seed_metrics = []
 
     for seed_idx, seed in enumerate(seeds):
         if verbose:
             print(f"\nSeed {seed} ({seed_idx + 1}/{len(seeds)})")
 
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        seed_results = []
+        seed_predictions: list[SelectivePrediction] = []
+        seed_true_booms: list[int] = []
+        seed_true_quals: list[float] = []
 
         for _fold, (train_idx, test_idx) in enumerate(kf.split(sim_ids)):
             train_ids = [sim_ids[i] for i in train_idx]
             test_ids = [sim_ids[i] for i in test_idx]
             train_booms = boom_frames[train_idx]
-            test_booms = boom_frames[test_idx]
             train_quals = qualities[train_idx]
-            test_quals = qualities[test_idx]
 
             # Train pipeline
             pipeline = BoomDetectionPipeline(
@@ -275,54 +276,55 @@ def cross_validate(
             )
             pipeline.fit(train_ids, train_booms, train_quals, cache)
 
-            # Predict
+            # Predict and convert to SelectivePrediction
             results = pipeline.predict(test_ids, cache)
+            for res in results:
+                seed_predictions.append(SelectivePrediction.from_dict(res))
 
-            for res, true_boom, true_qual in zip(results, test_booms, test_quals):
-                res['true_boom'] = int(true_boom)
-                res['true_quality'] = float(true_qual)
-                seed_results.append(res)
+            seed_true_booms.extend(boom_frames[test_idx].tolist())
+            seed_true_quals.extend(qualities[test_idx].tolist())
 
-        # Compute metrics for this seed
-        accepted = [r for r in seed_results if r['accepted']]
-        if accepted:
-            errors = [abs(r['cnn_pred'] - r['true_boom']) for r in accepted]
-            seed_mae = np.mean(errors)
-            seed_within5 = np.mean([e <= 5 for e in errors]) * 100
-            seed_acceptance = len(accepted) / len(seed_results) * 100
-        else:
-            seed_mae = float('nan')
-            seed_within5 = float('nan')
-            seed_acceptance = 0.0
-
-        all_seed_results.append({
-            'mae': seed_mae,
-            'within_5': seed_within5,
-            'acceptance_rate': seed_acceptance,
-            'n_accepted': len(accepted),
-        })
+        # Compute metrics using unified framework
+        metrics = compute_selective_metrics(
+            seed_predictions,
+            np.array(seed_true_booms),
+            np.array(seed_true_quals),
+        )
+        all_seed_metrics.append(metrics)
 
         if verbose:
-            print(f"  MAE: {seed_mae:.2f}, Accepted: {len(accepted)}/{len(seed_results)}")
+            mae = metrics['selective_mae']
+            n_acc = metrics['n_accepted']
+            n_tot = metrics['n_total']
+            print(f"  MAE: {mae:.2f}, Accepted: {n_acc}/{n_tot}")
 
     # Aggregate across seeds
-    maes = [r['mae'] for r in all_seed_results if not np.isnan(r['mae'])]
-    within5s = [r['within_5'] for r in all_seed_results if not np.isnan(r['within_5'])]
-    acceptances = [r['acceptance_rate'] for r in all_seed_results]
+    metric_names = ['selective_mae', 'selective_within_5', 'coverage']
+    mean_metrics = {}
+    std_metrics = {}
+
+    for name in metric_names:
+        values = [m[name] for m in all_seed_metrics if not np.isnan(m.get(name, float('nan')))]
+        if values:
+            mean_metrics[name] = float(np.mean(values))
+            std_metrics[name] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+        else:
+            mean_metrics[name] = float('nan')
+            std_metrics[name] = 0.0
 
     return {
         'n_seeds': len(seeds),
         'n_splits': n_splits,
         'seeds': seeds,
-        # Main metrics with uncertainty
-        'mae_mean': float(np.mean(maes)) if maes else float('nan'),
-        'mae_std': float(np.std(maes, ddof=1)) if len(maes) > 1 else 0.0,
-        'within_5_mean': float(np.mean(within5s)) if within5s else float('nan'),
-        'within_5_std': float(np.std(within5s, ddof=1)) if len(within5s) > 1 else 0.0,
-        'acceptance_rate_mean': float(np.mean(acceptances)),
-        'acceptance_rate_std': float(np.std(acceptances, ddof=1)) if len(acceptances) > 1 else 0.0,
+        # Main metrics with uncertainty (backward compatible names)
+        'mae_mean': mean_metrics.get('selective_mae', float('nan')),
+        'mae_std': std_metrics.get('selective_mae', 0.0),
+        'within_5_mean': mean_metrics.get('selective_within_5', float('nan')) * 100,
+        'within_5_std': std_metrics.get('selective_within_5', 0.0) * 100,
+        'acceptance_rate_mean': mean_metrics.get('coverage', 0.0) * 100,
+        'acceptance_rate_std': std_metrics.get('coverage', 0.0) * 100,
         # Per-seed results for analysis
-        'seed_results': all_seed_results,
+        'seed_metrics': all_seed_metrics,
         # Config
         'agreement_threshold': agreement_threshold,
         'quality_threshold': quality_threshold,

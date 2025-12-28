@@ -72,24 +72,43 @@ class MyModel:
 ### Resolution Invariance
 All features must aggregate over pendulums (axis=1) so they work regardless of pendulum count.
 
+### Selective Predictions (Unified Framework)
+```python
+from boom_detection.evaluation import SelectivePrediction, compute_selective_metrics, RunArtifact
+
+# Convert pipeline output to canonical format
+predictions = [SelectivePrediction.from_dict(p) for p in pipeline.predict(sim_ids, cache)]
+
+# Compute selective metrics (coverage, selective_mae, etc.)
+metrics = compute_selective_metrics(predictions, true_booms, true_qualities)
+print(f"Selective MAE: {metrics['selective_mae']:.2f} at {metrics['coverage']:.1%} coverage")
+
+# Save run for reproducibility
+artifact = RunArtifact.create(config, predictions, true_booms, true_qualities, sim_ids)
+artifact.save(Path("runs/my_experiment"))
+```
+
 ## File Guide
 
 | File | Purpose |
 |------|---------|
 | `deploy_pipeline.py` | **Start here** - production pipeline |
+| `evaluation.py` | **Unified evaluation framework** - CachedEvaluator, SelectivePrediction, RunArtifact |
 | `features.py` | Feature extraction + caching |
 | `frame_models.py` | HistGBM classifier |
 | `sequence_models.py` | CNN, LSTM, Transformer |
 | `quality_models.py` | Quality prediction |
+| `run_baselines.py` | Baseline comparison (uses CachedEvaluator) |
 | `pipeline.py` | Multi-stage pipeline components |
-| `run_baselines.py` | Baseline comparison |
-| `evaluation.py` | Metrics |
 | `ensemble.py` | Adaptive ensemble |
 
 ## Do
 
 - **Always use multi-seed evaluation** - report mean ± std, not single-seed results
-- Use `CachedEvaluator.cross_validate()` for robust evaluation
+- **Use the unified evaluation framework** - `CachedEvaluator`, `SelectivePrediction`, `compute_selective_metrics`
+- Use `CachedEvaluator.cross_validate()` for robust evaluation of non-selective models
+- Use `SelectivePrediction` for selective (abstaining) predictors
+- Use `RunArtifact` to save experiment results for reproducibility
 - Use `FeatureCache` with `cache_dir` for persistence
 - Use `HistGradientBoosting*` (not `GradientBoosting*`) - 500x faster
 - Split at simulation level (not frame level) to prevent data leakage
@@ -97,9 +116,10 @@ All features must aggregate over pendulums (axis=1) so they work regardless of p
 ## Don't
 
 - **Don't report single-seed results** - they can vary by ±50% due to small sample size
+- **Don't implement custom CV/evaluation code** - use the unified framework
 - Don't use `metadata.json` boom_frame (unreliable auto-detection)
 - Don't use oracle quality at inference (annotations not available)
-- Don't commit `.feature_cache/`
+- Don't commit `.feature_cache/` or `runs/`
 
 ## Key Findings
 
