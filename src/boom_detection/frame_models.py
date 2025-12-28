@@ -254,15 +254,17 @@ def get_frame_level_predictors() -> dict[str, callable]:
     Returns factory functions (not instances) so each evaluation seed gets a fresh model.
     This ensures hyperparameters are preserved across evaluations.
 
+    Note: We only include HistGBM variants (not regular GBM) because:
+    - HistGBM is ~500x faster with similar or better accuracy
+    - Regular GBM is prohibitively slow with 90+ sims × 1800 frames
+
     Usage:
         predictors = get_frame_level_predictors()
-        model = predictors['frame_gbm']()  # Creates new instance
+        model = predictors['frame_hist_gbm']()  # Creates new instance
     """
     return {
         'frame_ridge': lambda: FrameLevelRegressor(model='ridge'),
-        'frame_gbm': lambda: FrameLevelRegressor(model='gbm'),
         'frame_hist_gbm': lambda: FrameLevelRegressor(model='hist_gbm'),
         'frame_logistic': lambda: FrameLevelClassifier(model='logistic'),
-        'frame_gbm_clf': lambda: FrameLevelClassifier(model='gbm'),
         'frame_hist_gbm_clf': lambda: FrameLevelClassifier(model='hist_gbm'),
     }

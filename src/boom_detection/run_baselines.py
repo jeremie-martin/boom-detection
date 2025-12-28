@@ -22,6 +22,7 @@ from .loader import load_dataset
 from .evaluation import CachedEvaluator
 from .features import FeatureCache, FeatureConfig
 from .frame_models import get_frame_level_predictors
+from .logging_config import logger
 
 
 # =============================================================================
@@ -278,6 +279,7 @@ def run_baselines(
     print("=" * 60)
 
     for name, predictor_factory in baselines.items():
+        logger.info("Evaluating baseline: {}", name)
         t0 = time.time()
         try:
             # Use unified CachedEvaluator

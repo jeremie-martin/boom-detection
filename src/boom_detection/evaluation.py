@@ -514,7 +514,7 @@ class CachedEvaluator:
 
             seed_elapsed = time.time() - seed_start
             logger.info("Seed {} complete in {:.1f}s (MAE: {:.2f})",
-                       seed, seed_elapsed, result.mean_metrics['mae'])
+                       seed, seed_elapsed, result.aggregate_metrics['mae'])
 
         multi_result = MultiSeedResult(
             task=task,
