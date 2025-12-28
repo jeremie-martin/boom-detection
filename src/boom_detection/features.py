@@ -235,6 +235,246 @@ def velocity_features(data: np.ndarray) -> np.ndarray:
 
 
 # =============================================================================
+# Advanced Velocity Features (Dynamics-based)
+# =============================================================================
+# These capture velocity/momentum dynamics rather than just positions.
+# Key insight: at the boom, pendulums diverge in opposite directions.
+
+def _tip_velocities(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute tip velocities from angles and angular velocities.
+
+    For a double pendulum (L1 = L2 = 1.0):
+    - vx2 = L1*ω1*cos(θ1) + L2*(ω1+ω2)*cos(θ1+θ2)
+    - vy2 = -L1*ω1*sin(θ1) - L2*(ω1+ω2)*sin(θ1+θ2)
+
+    Args:
+        data: Shape (frames, pendulums, 8)
+
+    Returns:
+        (vx2, vy2): Both shape (frames, pendulums)
+    """
+    th1 = data[:, :, TH1]
+    th2 = data[:, :, TH2]
+    w1 = data[:, :, W1]
+    w2 = data[:, :, W2]
+
+    th12 = th1 + th2  # combined angle for second arm
+    w12 = w1 + w2     # combined angular velocity
+
+    # L1 = L2 = 1.0 in our simulations
+    vx2 = w1 * np.cos(th1) + w12 * np.cos(th12)
+    vy2 = -w1 * np.sin(th1) - w12 * np.sin(th12)
+
+    return vx2, vy2
+
+
+def velocity_dynamics_features(data: np.ndarray) -> np.ndarray:
+    """
+    Compute advanced velocity dynamics features.
+
+    These capture how pendulums move, not just where they are.
+    Particularly useful for detecting the boom moment when pendulums
+    suddenly diverge in opposite directions.
+
+    Features:
+    1. velocity_dispersion: Circular spread of velocity directions (0=coherent, 1=random)
+    2. velocity_bimodality: Detects "half left, half right" boom pattern
+    3. speed_cv: Coefficient of variation of tip speeds (normalized variance)
+    4. angular_momentum_balance: How evenly split clockwise/counterclockwise
+
+    Args:
+        data: Shape (frames, pendulums, 8)
+
+    Returns:
+        Shape (frames, 4) - the four velocity dynamics metrics
+    """
+    vx2, vy2 = _tip_velocities(data)
+    n_frames, n_pendulums = vx2.shape
+
+    # 1. Velocity Dispersion: circular spread of velocity directions
+    # 1 - R where R is mean resultant length of velocity angles
+    speeds = np.sqrt(vx2**2 + vy2**2)
+    v_angles = np.arctan2(vy2, vx2)
+
+    # Mean resultant length R for velocity directions
+    mean_cos = np.mean(np.cos(v_angles), axis=1)
+    mean_sin = np.mean(np.sin(v_angles), axis=1)
+    R = np.sqrt(mean_cos**2 + mean_sin**2)
+    velocity_dispersion = 1 - R  # 0 = all same direction, 1 = uniform
+
+    # 2. Velocity Bimodality: at boom, half move left, half right
+    # Project velocities onto principal axis and measure bimodality
+    bimodality = _compute_velocity_bimodality(vx2, vy2)
+
+    # 3. Speed CV: coefficient of variation = std/mean (normalized variance)
+    mean_speed = np.mean(speeds, axis=1)
+    std_speed = np.std(speeds, axis=1)
+    mean_speed_safe = np.where(mean_speed < 1e-12, 1e-12, mean_speed)
+    speed_cv = np.minimum(1.0, std_speed / mean_speed_safe)  # clamp to [0, 1]
+
+    # 4. Angular Momentum Balance: are pendulums evenly split CW/CCW?
+    # Compute tip angular momentum: L = x*vy - y*vx
+    x2 = data[:, :, X2]
+    y2 = data[:, :, Y2]
+    L_z = x2 * vy2 - y2 * vx2  # angular momentum per pendulum
+
+    # Count positive (CCW) - negative is just n_pendulums - n_positive
+    n_positive = np.sum(L_z > 0, axis=1)
+    # Balance = 4 * p * (1-p), where p = fraction positive. Peak at 0.5
+    p = n_positive / n_pendulums
+    angular_momentum_balance = 4 * p * (1 - p)
+
+    return np.stack([
+        velocity_dispersion,
+        bimodality,
+        speed_cv,
+        angular_momentum_balance
+    ], axis=1)
+
+
+def _compute_velocity_bimodality(vx: np.ndarray, vy: np.ndarray) -> np.ndarray:
+    """
+    Compute velocity bimodality: how "half left, half right" is the pattern.
+
+    Algorithm:
+    1. Find principal velocity direction (via covariance eigenvector)
+    2. Project velocities onto this axis
+    3. Measure how bimodal the projection is (gap between positive/negative means)
+
+    Args:
+        vx, vy: Shape (frames, pendulums)
+
+    Returns:
+        Shape (frames,) - bimodality in [0, 1]
+    """
+    n_frames, n_pendulums = vx.shape
+    n = float(n_pendulums)
+    bimodality = np.zeros(n_frames)
+
+    for f in range(n_frames):
+        vx_f = vx[f]
+        vy_f = vy[f]
+
+        # Mean velocity
+        mean_vx = np.mean(vx_f)
+        mean_vy = np.mean(vy_f)
+
+        # Covariance matrix
+        dvx = vx_f - mean_vx
+        dvy = vy_f - mean_vy
+        cov_xx = np.mean(dvx * dvx)
+        cov_yy = np.mean(dvy * dvy)
+        cov_xy = np.mean(dvx * dvy)
+
+        # Find principal direction (largest eigenvector of 2x2 cov matrix)
+        trace = cov_xx + cov_yy
+        det = cov_xx * cov_yy - cov_xy * cov_xy
+        disc = np.sqrt(max(0.0, trace**2 / 4 - det))
+        lambda1 = trace / 2 + disc
+
+        if lambda1 < 1e-12:
+            continue  # no variance
+
+        # Eigenvector for lambda1
+        if abs(cov_xy) > 1e-12:
+            ax, ay = cov_xy, lambda1 - cov_xx
+        elif cov_xx > cov_yy:
+            ax, ay = 1.0, 0.0
+        else:
+            ax, ay = 0.0, 1.0
+
+        # Normalize
+        a_norm = np.sqrt(ax**2 + ay**2)
+        if a_norm < 1e-12:
+            continue
+        ax, ay = ax / a_norm, ay / a_norm
+
+        # Project velocities onto principal axis
+        projections = vx_f * ax + vy_f * ay
+
+        # Compute bimodality: gap between positive/negative means
+        pos_mask = projections > 0
+        neg_mask = projections <= 0
+        n_pos = np.sum(pos_mask)
+        n_neg = np.sum(neg_mask)
+
+        if n_pos == 0 or n_neg == 0:
+            continue
+
+        pos_mean = np.mean(projections[pos_mask])
+        neg_mean = np.mean(projections[neg_mask])
+        gap = pos_mean - neg_mean  # always positive
+
+        # Normalize by std
+        std = np.std(projections)
+        if std < 1e-12:
+            continue
+
+        # Bimodality = gap / (2*std), roughly [0, 2] for bimodal
+        bimod = gap / (2 * std)
+
+        # Weight by balance (most bimodal when 50/50 split)
+        balance = 4 * (n_pos / n) * (n_neg / n)
+
+        bimodality[f] = min(1.0, bimod * balance)
+
+    return bimodality
+
+
+def neighbor_coherence_features(data: np.ndarray) -> np.ndarray:
+    """
+    Compute local neighbor coherence features.
+
+    These detect caustic "folds" where nearby pendulums (in index space)
+    cluster together in position space.
+
+    At a fold, min neighbor distance << median neighbor distance.
+
+    Features:
+    1. fold_strength: How strong are the folds (log ratio of min/median distance)
+    2. coherence_ratio: Min/median neighbor distance ratio
+
+    Args:
+        data: Shape (frames, pendulums, 8)
+
+    Returns:
+        Shape (frames, 2) - fold_strength and coherence_ratio
+    """
+    x2 = data[:, :, X2]
+    y2 = data[:, :, Y2]
+    n_frames, n_pendulums = x2.shape
+
+    if n_pendulums < 3:
+        return np.zeros((n_frames, 2))
+
+    # Compute neighbor distances (consecutive pendulums in index order)
+    dx = np.diff(x2, axis=1)  # (frames, n-1)
+    dy = np.diff(y2, axis=1)
+    distances = np.sqrt(dx**2 + dy**2)
+
+    # Min and median distances per frame
+    min_d = np.min(distances, axis=1)
+    median_d = np.median(distances, axis=1)
+
+    # Avoid division by zero
+    median_d_safe = np.where(median_d < 1e-12, 1e-12, median_d)
+
+    # Coherence ratio: min/median (low = strong folds)
+    coherence_ratio = min_d / median_d_safe
+
+    # Fold strength: -log10(ratio), clamped
+    # Caustic: ratio ~ 0.001 -> fold_strength ~ 3
+    # Chaos: ratio ~ 0.1-0.3 -> fold_strength ~ 0.5-1
+    # Start: ratio ~ 1 -> fold_strength ~ 0
+    log_ratio = -np.log10(np.clip(coherence_ratio, 1e-6, 1.0))
+    # Normalize: subtract chaos baseline (~1.0) and scale
+    fold_strength = np.clip((log_ratio - 1.0) / 2.0, 0.0, 1.0)
+
+    return np.stack([fold_strength, coherence_ratio], axis=1)
+
+
+# =============================================================================
 # Caustic / Angular Distribution Features
 # =============================================================================
 
@@ -517,6 +757,9 @@ class FeatureConfig:
     include_velocity: bool = True
     include_caustic: bool = False  # caustic/angular distribution features
     caustic_bins: int = 36  # number of angular bins (36 = 10° bins)
+    # Velocity dynamics features (detect boom via divergence pattern)
+    include_velocity_dynamics: bool = False  # velocity dispersion, bimodality, etc.
+    include_neighbor_coherence: bool = False  # fold strength, coherence ratio
     include_derivatives: bool = True
     derivative_orders: tuple[int, ...] = (1, 2)
     # Subsampling for speed and resolution invariance testing
@@ -556,6 +799,15 @@ CAUSTIC_CONFIG = FeatureConfig(
     include_caustic=True,
 )
 
+# Full dynamics configuration with velocity dynamics and neighbor coherence
+# These features capture the boom moment via pendulum divergence patterns
+DYNAMICS_CONFIG = FeatureConfig(
+    max_pendulums=2000,
+    include_caustic=True,
+    include_velocity_dynamics=True,
+    include_neighbor_coherence=True,
+)
+
 # Feature names for each extraction function
 FEATURE_GROUPS = {
     'variance': ['var_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
@@ -569,6 +821,8 @@ FEATURE_GROUPS = {
     'angular_spread': ['th1_spread', 'th2_spread', 'th1_cstd', 'th2_cstd'],
     'velocity': ['var_w1', 'var_w2', 'mean_abs_w1', 'mean_abs_w2', 'range_abs_w1', 'range_abs_w2'],
     'caustic': ['angular_causticness', 'tip_causticness', 'joint_concentration', 'organization_causticness'],
+    'velocity_dynamics': ['velocity_dispersion', 'velocity_bimodality', 'speed_cv', 'angular_momentum_balance'],
+    'neighbor_coherence': ['fold_strength', 'coherence_ratio'],
 }
 
 
@@ -618,6 +872,10 @@ class FeatureExtractor:
             base_groups.append('velocity')
         if cfg.include_caustic:
             base_groups.append('caustic')
+        if cfg.include_velocity_dynamics:
+            base_groups.append('velocity_dynamics')
+        if cfg.include_neighbor_coherence:
+            base_groups.append('neighbor_coherence')
 
         for group in base_groups:
             names.extend(FEATURE_GROUPS[group])
@@ -693,6 +951,12 @@ class FeatureExtractor:
             features_list.append(velocity_features(data))
         if cfg.include_caustic:
             features_list.append(caustic_features(data, cfg.caustic_bins))
+
+        # Advanced velocity dynamics features
+        if cfg.include_velocity_dynamics:
+            features_list.append(velocity_dynamics_features(data))
+        if cfg.include_neighbor_coherence:
+            features_list.append(neighbor_coherence_features(data))
 
         # Combine base features
         base_features = np.hstack(features_list)
