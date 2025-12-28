@@ -71,6 +71,7 @@ class BoomDetectionPipeline:
         seed: int | None = None,  # Random seed for reproducibility
         calibrate_quality: bool = True,  # Calibrate quality predictions
         hgb_feature_subset: tuple[str, ...] | None = None,  # Feature names for HGB (None = use all)
+        feature_config: FeatureConfig | None = None,  # Feature extraction config (saved with model)
     ):
         self.accept_threshold = accept_threshold
         self.agreement_weight = agreement_weight
@@ -86,6 +87,7 @@ class BoomDetectionPipeline:
         self.seed = seed
         self.calibrate_quality = calibrate_quality
         self.hgb_feature_subset = hgb_feature_subset
+        self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
 
         # Models (set during training)
         self.cnn = None
@@ -345,12 +347,14 @@ class BoomDetectionPipeline:
             path/hgb.joblib - HistGBM model
             path/quality.joblib - Quality model
             path/config.json - Pipeline configuration
+            path/feature_config.json - Feature extraction config
 
         Args:
             path: Directory to save to
         """
         import torch
         import joblib
+        from dataclasses import asdict
 
         if self.cnn is None:
             raise RuntimeError("Pipeline not fitted. Call fit() first.")
@@ -373,7 +377,7 @@ class BoomDetectionPipeline:
         if self.quality_calibrator is not None:
             joblib.dump(self.quality_calibrator, path / 'quality_calibrator.joblib')
 
-        # Save config
+        # Save pipeline config
         config = {
             'accept_threshold': self.accept_threshold,
             'agreement_weight': self.agreement_weight,
@@ -390,6 +394,13 @@ class BoomDetectionPipeline:
         }
         with open(path / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
+
+        # Save feature extraction config (critical for deployment)
+        feature_config_dict = asdict(self.feature_config)
+        with open(path / 'feature_config.json', 'w') as f:
+            json.dump(feature_config_dict, f, indent=2)
+
+        logger.info("Pipeline saved to {}", path)
 
     @classmethod
     def from_pretrained(cls, path: Path, device: str = 'auto') -> 'BoomDetectionPipeline':
@@ -412,6 +423,14 @@ class BoomDetectionPipeline:
         with open(path / 'config.json') as f:
             config = json.load(f)
 
+        # Load feature config (for inference on new simulations)
+        feature_config = None
+        feature_config_path = path / 'feature_config.json'
+        if feature_config_path.exists():
+            with open(feature_config_path) as f:
+                feature_config_dict = json.load(f)
+                feature_config = FeatureConfig(**feature_config_dict)
+
         # Create pipeline with saved config
         hgb_subset = config.get('hgb_feature_subset')
         pipeline = cls(
@@ -424,6 +443,7 @@ class BoomDetectionPipeline:
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
             hgb_feature_subset=tuple(hgb_subset) if hgb_subset else None,
+            feature_config=feature_config,
         )
 
         pipeline.n_features = config['n_features']
@@ -459,6 +479,69 @@ class BoomDetectionPipeline:
             pipeline.quality_calibrator = joblib.load(calibrator_path)
 
         return pipeline
+
+    def predict_simulation(self, simulation: np.ndarray) -> SelectivePrediction:
+        """
+        Predict boom frame for a raw simulation array.
+
+        This is the main inference method for deployment. It handles feature
+        extraction internally using the saved feature config.
+
+        Args:
+            simulation: Raw simulation data, shape (frames, pendulums, 8)
+                       where 8 = [x1, y1, x2, y2, th1, th2, w1, w2]
+
+        Returns:
+            SelectivePrediction with boom_frame, accepted, and quality scores
+
+        Example:
+            >>> pipeline = BoomDetectionPipeline.from_pretrained('models/v1')
+            >>> sim_data = np.load('new_simulation.npy')  # or load_simulation(...)
+            >>> result = pipeline.predict_simulation(sim_data)
+            >>> if result.accepted:
+            ...     print(f"Boom at frame {result.boom_frame}")
+        """
+        from .features import extract_features
+
+        if self.cnn is None:
+            raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
+
+        # Extract features using the saved config
+        features = extract_features(simulation, config=self.feature_config)
+
+        # Validate feature count matches training
+        if features.shape[1] != self.n_features:
+            raise ValueError(
+                f"Feature count mismatch: got {features.shape[1]}, expected {self.n_features}. "
+                "Make sure the feature_config matches what was used during training."
+            )
+
+        return self.predict_one(features)
+
+    def predict_file(self, simulation_path: str | Path) -> SelectivePrediction:
+        """
+        Predict boom frame for a simulation file.
+
+        Convenience method that loads the simulation and predicts in one call.
+
+        Args:
+            simulation_path: Path to simulation_data.bin file
+
+        Returns:
+            SelectivePrediction with boom_frame, accepted, and quality scores
+
+        Example:
+            >>> pipeline = BoomDetectionPipeline.from_pretrained('models/v1')
+            >>> result = pipeline.predict_file('data/simulations/run_xxx/simulation_data.bin')
+            >>> print(f"Accepted: {result.accepted}, Boom: {result.boom_frame}")
+        """
+        from .loader import load_simulation
+
+        if self.cnn is None:
+            raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
+
+        simulation = load_simulation(simulation_path)
+        return self.predict_simulation(simulation)
 
 
 def cross_validate(
