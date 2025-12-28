@@ -363,6 +363,40 @@ Use different features for different models:
 
 **Key insight**: CNN excels on high-quality (MAE 8.5), HGB on low-quality (MAE 18.2).
 
+## Phase 11: Error Analysis & Quality-Aware Routing
+
+### Error Pattern Analysis
+
+**Worst 10 cases:**
+- 70% are low-quality simulations
+- Model disagreement: 47 frames (vs 17 overall)
+- Neither model consistently better - both fail on hard cases
+
+**Key insight: Models have complementary strengths!**
+
+| Model | High-Q MAE | Low-Q MAE |
+|-------|-----------|-----------|
+| CNN | **8.4** | 24.9 |
+| HGB | 11.2 | **18.2** |
+
+CNN excels on high-quality, HGB on low-quality!
+
+### Quality-Aware Routing
+
+Route predictions based on predicted quality:
+- High-quality → Use CNN (better at 8.4 vs 11.2)
+- Low-quality → Use HGB (better at 18.2 vs 24.9)
+
+| Method | MAE | Notes |
+|--------|-----|-------|
+| HGB alone | 13.9 | Baseline |
+| Simple mean | 13.7 | Basic ensemble |
+| Oracle quality-aware | 12.2 | Using true quality |
+| **Predicted quality-aware** | **11.8** | Using predicted quality |
+| Oracle (best model) | 7.0 | Theoretical limit |
+
+**Best result: MAE 11.8 with predicted quality routing!**
+
 ## Progress Summary
 
 | Phase | Best MAE | Key Finding |
@@ -370,11 +404,14 @@ Use different features for different models:
 | Baseline | 18.9 | HistGBM frame classifier |
 | Phase 3 | 16.2 | Hyperparameter optimization |
 | Phase 4 | 14.0 | CNN+HGB ensemble |
-| **Phase 5** | **13.3** | Local context features + optimal ensemble |
+| Phase 5 | 13.3 | Local context features |
+| **Phase 7** | **11.8** | Quality-aware model routing |
+
+**Progress: 18.9 → 11.8 (37% improvement)**
 
 ## Next Steps
 
-1. **Error analysis**: Understand the 23 disagreement cases in detail
-2. **Alternative formulations**: Regression vs classification
-3. **Attention mechanisms**: Let CNN focus on boom region
-4. **Multi-task learning**: Predict frame + quality jointly
+1. **Attention mechanisms**: Let CNN focus on boom region
+2. **Multi-task learning**: Predict frame + quality jointly
+3. **Improve quality prediction**: Better routing = lower error
+4. **Synthesis**: Combine all best techniques
