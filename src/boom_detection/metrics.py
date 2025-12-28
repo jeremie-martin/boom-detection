@@ -174,7 +174,12 @@ def compute_selective_metrics(
         true_qualities: Optional ground truth qualities
 
     Returns:
-        Dictionary with selective metrics
+        Dictionary with selective metrics including:
+        - n_total, n_accepted, coverage: Basic counts
+        - selective_mae, selective_median_ae, selective_max_ae: Error metrics
+        - selective_within_5, selective_within_10: Accuracy at thresholds
+        - aurc: Area Under Risk-Coverage curve (lower is better)
+        - optimal_coverage: Coverage at minimum risk-coverage product
     """
     n_total = len(predictions)
     accepted_indices = [i for i, p in enumerate(predictions) if p.accepted]
@@ -219,6 +224,12 @@ def compute_selective_metrics(
     if rejected_indices and true_qualities is not None:
         rejected_quals = true_qualities[rejected_indices]
         metrics['rejected_high_quality_rate'] = float(np.mean(rejected_quals >= 0.5))
+
+    # Add risk-coverage metrics (AURC)
+    if n_total > 0:
+        rc = compute_risk_coverage_curve(predictions, true_booms)
+        metrics['aurc'] = rc['aurc']
+        metrics['optimal_coverage'] = rc['optimal_coverage']
 
     return metrics
 
@@ -294,7 +305,7 @@ def compute_risk_coverage_curve(
     risks = np.array(risks)
 
     # Compute AURC (Area Under Risk-Coverage curve) using trapezoidal rule
-    aurc = float(np.trapz(risks, coverages))
+    aurc = float(np.trapezoid(risks, coverages))
 
     # Find optimal coverage (minimizes risk * (1 - coverage) or similar)
     risk_coverage_product = risks * (1 - coverages + 0.1)

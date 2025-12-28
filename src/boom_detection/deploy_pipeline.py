@@ -66,9 +66,6 @@ class BoomDetectionPipeline:
         n_quality_features: int = 50,  # Top correlated features
         seed: int | None = None,  # Random seed for reproducibility
         calibrate_quality: bool = True,  # Calibrate quality predictions
-        # Legacy parameters for backward compatibility
-        agreement_threshold: int | None = None,
-        quality_threshold: float | None = None,
     ):
         self.accept_threshold = accept_threshold
         self.agreement_weight = agreement_weight
@@ -77,19 +74,6 @@ class BoomDetectionPipeline:
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
-
-        # If legacy thresholds provided, compute equivalent accept_threshold
-        # This maintains backward compatibility with old configs
-        if agreement_threshold is not None and quality_threshold is not None:
-            # Convert old thresholds to approximate accept_threshold
-            # agreement_threshold=5 -> agreement_score = 1 - 5/10 = 0.5
-            # quality_threshold=0.55 -> quality_score = 0.55
-            # accept_score = 0.4 * 0.5 + 0.6 * 0.55 = 0.53
-            agreement_score = 1.0 - min(agreement_threshold / 10.0, 1.0)
-            self.accept_threshold = (
-                self.agreement_weight * agreement_score +
-                self.quality_weight * quality_threshold
-            )
 
         # Models (set during training)
         self.cnn = None
@@ -377,7 +361,7 @@ class BoomDetectionPipeline:
         with open(path / 'config.json') as f:
             config = json.load(f)
 
-        # Create pipeline with saved config (handle both old and new formats)
+        # Create pipeline with saved config
         pipeline = cls(
             accept_threshold=config.get('accept_threshold', 0.5),
             agreement_weight=config.get('agreement_weight', 0.4),
@@ -385,9 +369,6 @@ class BoomDetectionPipeline:
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
-            # Legacy support: convert old thresholds if present
-            agreement_threshold=config.get('agreement_threshold'),
-            quality_threshold=config.get('quality_threshold'),
         )
 
         pipeline.n_features = config['n_features']
