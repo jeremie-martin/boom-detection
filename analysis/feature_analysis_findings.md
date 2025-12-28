@@ -127,13 +127,45 @@ The discrepancy occurs because:
 
 While `joint_concentration` ranks #1 in HGB feature importance, the full pipeline performs best **without** caustic features because the CNN component is negatively affected.
 
+## Feature Reduction Study
+
+Tested removing features to find optimal minimal set:
+
+### HGB Classifier (standalone)
+
+| Configuration | Features | MAE | Change |
+|---------------|----------|-----|--------|
+| Full | 183 | 22.93 | baseline |
+| No 2nd derivatives | 122 | 22.40 | +2.3% better |
+| **No derivatives** | **61** | **21.58** | **+5.9% better** |
+| **Minimal stats** | **87** | **21.14** | **+7.8% better** |
+| Too minimal | 29 | 22.39 | +2.4% better |
+
+**Finding**: HGB performs BETTER with fewer features. Derivatives add noise for the per-frame classifier.
+
+### Full Pipeline (with CNN)
+
+| Configuration | Features | Selective MAE | Coverage |
+|---------------|----------|---------------|----------|
+| **Full** | **183** | **5.92** | **40.0%** |
+| No derivatives | 61 | 7.14 | 32.2% |
+| Minimal stats | 87 | 10.27 | 33.3% |
+
+**Finding**: Pipeline needs ALL features (183). CNN benefits from temporal derivatives.
+
+### Why the Difference?
+
+1. **CNN benefits from derivatives**: Sequence model uses temporal patterns explicitly encoded in d1/d2 features
+2. **HGB treats frames independently**: Doesn't use temporal context, so derivatives are just noise
+3. **Quality prediction**: More features may help quality estimation, affecting acceptance decisions
+
 ## Recommendations
 
-1. **For full pipeline (production)**: Use `include_caustic=False` - best selective MAE
-2. **For HGB-only use cases**: Use `include_caustic=True` with all features
-3. **For experimentation**: Use `caustic_subset` parameter to test specific features
-4. **Focus on theta features**: th1 and th2 statistics dominate importance
-5. **Consider feature reduction**: Many features are highly correlated
+1. **For full pipeline (production)**: Use `FeatureConfig()` with all 183 features
+2. **For HGB-only use cases**: Use `include_derivatives=False` (61 features) or minimal config
+3. **Avoid caustic features for pipeline**: They help HGB but hurt CNN, net negative
+4. **For experimentation**: Use `caustic_subset` parameter to test specific features
+5. **Focus on theta features**: th1 and th2 statistics dominate importance in HGB
 
 ## Files
 
