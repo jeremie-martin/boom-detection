@@ -2,16 +2,21 @@
 
 ## Current State
 
-Best pipeline achieves **MAE 6.7 ± 0.6** on ~34% of simulations using:
-1. CNN + HGB agreement filter (reject if |CNN - HGB| > 5)
-2. Quality prediction filter using Random Forest on top 50 features
+Best pipeline achieves **MAE 6.4 ± 0.5** on ~35% of simulations using:
+1. CNN (hidden=64, kernels=(5,11,21)) + HGB agreement filter
+2. Quality prediction using Random Forest on top 50 features
 3. CNN prediction for final boom frame
 
 ## Completed Investigations
 
+### CNN Architecture Optimization ✓
+- **Finding**: Larger kernels (5,11,21) and hidden_dim=64 work best
+- **Impact**: MAE improved from 6.7 to 6.4
+- **Key insight**: Longer-range temporal patterns matter for boom detection
+
 ### Quality Prediction Improvement ✓
 - **Finding**: Random Forest with top 50 features and ±25 window beats Ridge
-- **Impact**: Improved acceptance (31% → 34%) while maintaining MAE
+- **Impact**: Improved acceptance (31% → 35%) while maintaining MAE
 - **Key insight**: Derivative features (d1_*) predict quality, not variance/range
 
 ### Feature Importance Analysis ✓
@@ -25,22 +30,28 @@ Best pipeline achieves **MAE 6.7 ± 0.6** on ~34% of simulations using:
 - **Finding**: CNN (MAE 7.1) beats HGB (MAE 11.0) on agreement cases
 - **Impact**: Use CNN for final prediction, HGB only for confidence check
 
+### Rejection Analysis ✓
+- **Finding**: 51% fail agreement, 15% fail quality, 34% accepted
+- **Finding**: 45% of agreement failures are HIGH quality simulations
+- **Key insight**: Models genuinely struggle with some simulations (18+ frame error)
+- **Impact**: Confirms filters work correctly; improving model accuracy helps most
+
 ---
 
 ## Priority Areas to Explore Next
 
-### 1. Alternative Boom Detection Models (HIGH PRIORITY)
+### 1. Improve Individual Model Accuracy (HIGH PRIORITY)
 
-**Why it matters**: Current CNN is good but might not be optimal.
+**Why it matters**: Most rejections are due to model disagreement on genuinely hard cases. Better models would accept more simulations.
 
 **Things to try**:
-- [ ] Deeper/wider CNN architectures
-- [ ] Attention mechanism on top of CNN
-- [ ] Different optimizers/learning rates
-- [ ] Training with augmentation (currently disabled)
-- [ ] Different prediction strategy (regression vs classification)
+- [ ] Data augmentation for CNN (currently disabled)
+- [ ] Different CNN architectures (deeper, attention)
+- [ ] Better HGB features or tuning
+- [ ] Train on only high-quality simulations
+- [ ] Semi-supervised learning (use rejected predictions as pseudo-labels)
 
-**Key constraint**: Must be fast to train (< 2 minutes).
+**Expected impact**: Could increase acceptance from 35% to 50%+ while maintaining MAE.
 
 ---
 
@@ -51,7 +62,7 @@ Best pipeline achieves **MAE 6.7 ± 0.6** on ~34% of simulations using:
 **Things to try**:
 - [ ] Velocity/acceleration features (not just position)
 - [ ] Phase space features (angle-velocity pairs)
-- [ ] Fourier transform features
+- [ ] Fourier transform features (frequency content)
 - [ ] Entropy/complexity measures
 - [ ] Cross-correlation between pendulums
 
@@ -59,42 +70,38 @@ Best pipeline achieves **MAE 6.7 ± 0.6** on ~34% of simulations using:
 
 ---
 
-### 3. Understanding Hard Cases (MEDIUM PRIORITY)
-
-**Why it matters**: We reject 66% of simulations. Why?
-
-**Things to try**:
-- [ ] Analyze feature distributions for easy vs hard cases
-- [ ] What makes CNN and HGB disagree?
-- [ ] Can we predict which simulations will be hard?
-- [ ] Is there a pattern in the worst predictions?
-
-**Key question**: Is there a fundamental limit to detection accuracy?
-
----
-
-### 4. Ensemble Strategies (LOW PRIORITY)
+### 3. Ensemble Strategies (MEDIUM PRIORITY)
 
 **Why it matters**: Current simple agreement check might be suboptimal.
 
 **Things to try**:
-- [ ] Weighted average based on confidence
+- [ ] Weighted average based on prediction confidence
 - [ ] Stacking (meta-learner on top of CNN + HGB)
-- [ ] More diverse base models (Random Forest, etc.)
+- [ ] Train multiple CNNs with different seeds
+- [ ] Add more diverse base models
 
 ---
 
-### 5. Pipeline Optimization (LOW PRIORITY)
+### 4. Understanding Hard Cases (LOW PRIORITY)
 
-**Why it matters**: Once individual components are good, tune how they work together.
+**Why it matters**: Some simulations are fundamentally hard. Understanding why could help.
 
 **Things to try**:
+- [ ] Visualize hard vs easy cases
+- [ ] What features distinguish them?
+- [ ] Is there a physical explanation?
+
+---
+
+## Lower Priority (Optimization)
+
+These are fine-tuning and should be done last:
+
 - [ ] Optimize agreement threshold (currently 5)
 - [ ] Optimize quality threshold (currently 0.55)
 - [ ] Optimize quality window (currently ±25)
 - [ ] Optimize number of quality features (currently 50)
-
-**Note**: This is optimization, not fundamental improvement.
+- [ ] Grid search on CNN hyperparameters
 
 ---
 
@@ -106,3 +113,16 @@ Best pipeline achieves **MAE 6.7 ± 0.6** on ~34% of simulations using:
 - Commit regularly with clear messages
 - Focus on understanding, not just trying things blindly
 - Prefer simple changes that give clear wins
+
+---
+
+## Progress Summary
+
+| Date | MAE | Acceptance | Key Change |
+|------|-----|------------|------------|
+| Baseline | 18.9 | 100% | HistGBM only |
+| +Agreement | ~10 | ~50% | CNN+HGB filter |
+| +Quality | ~7 | ~30% | Quality filter |
+| +CNN pred | 7.5 | 31% | Use CNN not HGB |
+| +RF quality | 6.7 | 34% | Better quality model |
+| **+CNN tuning** | **6.4** | **35%** | Larger kernels |
