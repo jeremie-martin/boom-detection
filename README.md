@@ -5,12 +5,22 @@ Predict the "boom" frame in chaotic double pendulum simulations - the moment whe
 ## Pipeline
 
 ```
-Simulation ──► Features ──┬── CNN ───┬── agree? ──┬── quality > θ ? ──► ACCEPT (boom_frame)
-              (183/frame) └── HGB ───┘            └──────────────────► REJECT (null)
+                            ┌───────────┐
+  Simulation                │    CNN    │──► pred: 546
+  (2000 pendulums)          │ (PyTorch) │              ╲
+        │                   └───────────┘               ╲    ┌─────────────────┐
+        │     ┌──────────┐                               ══► │ Accept/Reject   │
+        └────►│ Features │                               ══► │                 │
+              │(183/frame)│                              ╱   │ score ≥ 0.60 ?  │
+              └──────────┘  ┌───────────┐               ╱    └────────┬────────┘
+                            │    HGB    │──► pred: 546                │
+                            │ (sklearn) │                    ┌────────┴────────┐
+                            └───────────┘                    ▼                 ▼
+                                                          ACCEPT            REJECT
+                                                       boom_frame=546    boom_frame=null
 ```
 
-**Confidence score**: `accept_score = 0.4 × agreement + 0.6 × quality`
-**Decision**: accept if `accept_score ≥ 0.60`
+**Accept score** = `0.4 × model_agreement + 0.6 × predicted_quality`
 
 ## Results (90 simulations, 3-seed evaluation)
 
