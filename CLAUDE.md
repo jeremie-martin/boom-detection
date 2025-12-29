@@ -13,12 +13,18 @@ This means:
 
 **Current best (90 simulations, 3-seed evaluation)**:
 
-*2-model pipeline (CNN + HGB) - recommended:*
+*3-model pipeline (CNN + HGB + LSTM) with std metric - NEW BEST:*
+- **Most selective (std/5)**: MAE 3.27 ± 0.56 frames at 12.2% coverage
+
+*2-model pipeline (CNN + HGB) - simpler alternative:*
 - Most selective (sqrt/5): MAE 3.4 ± 0.8 frames at 14% coverage
 - Balanced (sqrt/10): MAE 4.9 ± 1.2 frames at 22% coverage
 - Permissive (sqrt/15): MAE 4.9 ± 1.3 frames at 30% coverage
 
-**Key finding**: The 2-model pipeline (CNN + HGB) remains the best option. 3-model experiments (adding LSTM) showed no improvement - the additional model increases disagreement without improving accuracy.
+*Quality-only baseline - simplest:*
+- QualityGatedCombiner(0.7): MAE 4.38 ± 1.53 at 12.2% coverage
+
+**Key finding (Dec 2025 update)**: 3-model with `std` metric works! Using `disagreement_metric='std'` instead of `'range'` resolves the inflation problem. The extra LSTM model now improves accuracy.
 
 **Key findings from comprehensive evaluation (Dec 2025)**:
 - HGB alone: MAE 22.5 ± 0.6 frames (37% within 5 frames)
@@ -303,13 +309,14 @@ result = evaluate(dataset, cache)
 
 ## Key Findings
 
-1. **Model agreement is the best confidence signal** - better than quality prediction alone
+1. **Quality prediction is more important than agreement** - Weights 0.2/0.8 beat 0.4/0.6; agreement-only gating is poor
 2. **Use CNN for final prediction** - CNN is more accurate than HGB or average
-3. **2-model (CNN+HGB) is optimal** - 3-model adds noise without improving accuracy
-4. **scale=5 achieves MAE 3.4 at 14% coverage** - best accuracy when being selective
+3. **3-model with `std` metric IS optimal** - MAE 3.27 vs 3.38 for 2-model (use `disagreement_metric='std'`)
+4. **scale=5 achieves MAE 3.4 at 14% coverage** - best accuracy when being selective (2-model)
 5. **LSTM is the best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
 6. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
 7. **Caustic features do NOT improve the pipeline** - all tested formulas performed worse than no_caustic baseline
+8. **Quality-only gating is surprisingly effective** - QualityGatedCombiner(0.7) achieves MAE 4.38 at 12.2%
 
 ## Acceptance Formula Characterization
 
@@ -346,30 +353,46 @@ The relationship is **monotonic but non-linear** with diminishing returns at ext
 - **linear**: Simple, slightly worse at low coverage
 - **quadratic**: Similar to sqrt
 
-### Why 3-Model Doesn't Help
+### 3-Model Now Works (with `std` metric)
 
-| Metric | 2-model | 3-model | Impact |
-|--------|---------|---------|--------|
-| Mean disagreement | 11.3 | 17.1 | +52% inflation |
-| LSTM causes extra disagreement | - | 66% of cases | More rejections |
-| When LSTM disagrees, it's correct | - | 45% | No better than chance |
-| Correlation with error | r=0.44 | r=0.56 | Better signal, but... |
+The original 3-model experiments failed because `range` (max-min) inflates with more models. **Using `std` instead resolves this**:
 
-**Root cause**: Range-based disagreement (max-min) inflates with more models. LSTM acts as outlier without improving discrimination.
+| Configuration | MAE | Coverage | Notes |
+|---------------|-----|----------|-------|
+| 3-model with `std`, scale=5 | **3.27 ± 0.56** | 12.2% | **NEW BEST** |
+| 2-model with `range`, scale=5 | 3.38 ± 0.83 | 13.7% | Previous best |
+| 3-model with `range`, scale=10 | 3.77 ± 0.55 | 8.9% | Also works |
 
-**Paradox**: 3-model disagreement correlates BETTER with error, suggesting the signal IS useful but needs different aggregation (std instead of range?). With 90 simulations, simpler 2-model is more robust.
+**Why std works**:
+- `range` = max - min → inflates when LSTM disagrees (outlier effect)
+- `std` = standard deviation → robust to outliers
+- The 3-model disagreement correlates better with error (r=0.56 vs r=0.44), and `std` captures this
+
+**To use 3-model**:
+```python
+pipeline = BoomDetectionPipeline(
+    frame_models=('cnn', 'hgb', 'lstm'),
+    combiner=ThresholdCombiner(
+        disagreement_metric='std',  # Key change!
+        disagreement_scale=5.0,
+        threshold=0.60,
+    ),
+)
+```
 
 ### Recommended Configurations
 
 | Use Case | Config | MAE | Coverage |
 |----------|--------|-----|----------|
-| Maximum accuracy | sqrt/s=15/t=0.70 | ~2.8 | ~12% |
-| Conservative selective | sqrt/s=5/t=0.60 | ~3.4 | ~14% |
-| **Balanced (default)** | sqrt/s=15/t=0.60 | ~4.9 | ~30% |
-| High coverage | sqrt/s=40/t=0.60 | ~7.9 | ~50% |
+| **Maximum accuracy** | **3-model + std/s=5/t=0.60** | **~3.3** | **~12%** |
+| Best 2-model | 2-model + sqrt/s=5/t=0.60 | ~3.4 | ~14% |
+| Simplest | QualityGatedCombiner(0.7) | ~4.4 | ~12% |
+| **Balanced (default)** | 2-model + sqrt/s=15/t=0.60 | ~4.9 | ~30% |
+| High coverage | 2-model + sqrt/s=40/t=0.60 | ~7.9 | ~50% |
 
 See experiment scripts in `scripts/` for detailed results:
 - `scripts/characterize_acceptance.py` - Comprehensive formula sweeps
+- `scripts/experiment_combiner_ablations.py` - **Combiner ablations** (std vs range, baselines, weights)
 - `scripts/evaluate_3model_pipeline.py` - 2-model vs 3-model comparison
 - `scripts/evaluate_lstm.py` - Individual model (CNN/HGB/LSTM) evaluation
 - `scripts/comprehensive_evaluation.py` - Full evaluation with caustic formula comparison
