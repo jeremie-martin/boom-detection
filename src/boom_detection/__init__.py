@@ -141,27 +141,6 @@ try:
         "get_quality_predictors",
     ])
 
-    # Pipeline components (require sklearn)
-    from .pipeline import (
-        QualityFilter,
-        QualityAwarePipeline,
-        ConditionalPipeline,
-    )
-    __all__.extend([
-        "QualityFilter",
-        "QualityAwarePipeline",
-        "ConditionalPipeline",
-    ])
-
-    # Model agreement (require sklearn)
-    from .model_agreement import (
-        ModelAgreementAnalyzer,
-        ConfidenceWeightedEnsemble,
-    )
-    __all__.extend([
-        "ModelAgreementAnalyzer",
-        "ConfidenceWeightedEnsemble",
-    ])
 
     _ML_AVAILABLE = True
 
@@ -190,12 +169,6 @@ try:
         "get_sequence_models",
     ])
 
-    from .ensemble import (
-        AdaptiveEnsemble,
-    )
-    __all__.extend([
-        "AdaptiveEnsemble",
-    ])
 
     # Deploy pipeline requires both sklearn and torch
     if _ML_AVAILABLE:

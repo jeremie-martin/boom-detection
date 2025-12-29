@@ -12,8 +12,8 @@ Predict the "boom" frame in chaotic double pendulum simulations - the moment whe
   Simulation                │    CNN    │──► boom_frame = X
   (2000 pendulums)          │ (PyTorch) │                  ╲
         │                   └───────────┘                   ╲    ┌─────────────────┐
-        │     ┌──────────┐                                   ══► │ Accept/Reject   │
-        └────►│ Features │                                   ══► │                 │
+        │     ┌──────────┐                                   ══►│ Accept/Reject   │
+        └───►│ Features │                                   ══►│                 │
               │(183/frame)│                                  ╱   │ score ≥ 0.60 ?  │
               └──────────┘  ┌───────────┐                   ╱    └────────┬────────┘
                             │    HGB    │──► boom_frame = Y              │
