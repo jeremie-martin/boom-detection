@@ -59,11 +59,13 @@ class QualityRegressor:
         alpha: float = 1.0,
         n_estimators: int = 100,
         max_depth: int = 5,
+        seed: int | None = None,
     ):
         self.model_type = model
         self.alpha = alpha
         self.n_estimators = n_estimators
         self.max_depth = max_depth
+        self.seed = seed
         self._model = None
         self._feature_mean = None
         self._feature_std = None
@@ -122,7 +124,7 @@ class QualityRegressor:
             self._model = HistGradientBoostingRegressor(
                 max_iter=self.n_estimators,
                 max_depth=self.max_depth,
-                random_state=42,
+                random_state=self.seed if self.seed is not None else 42,
             )
         else:
             raise ValueError(f"Unknown model: {self.model_type}")
@@ -159,11 +161,13 @@ class QualityClassifier:
         model: str = 'hist_gbm',
         n_estimators: int = 100,
         max_depth: int = 5,
+        seed: int | None = None,
     ):
         self.threshold = threshold
         self.model_type = model
         self.n_estimators = n_estimators
         self.max_depth = max_depth
+        self.seed = seed
         self._model = None
         self._feature_mean = None
         self._feature_std = None
@@ -210,11 +214,14 @@ class QualityClassifier:
             self._model = HistGradientBoostingClassifier(
                 max_iter=self.n_estimators,
                 max_depth=self.max_depth,
-                random_state=42,
+                random_state=self.seed if self.seed is not None else 42,
             )
         elif self.model_type == 'logistic':
             from sklearn.linear_model import LogisticRegression
-            self._model = LogisticRegression(max_iter=1000, random_state=42)
+            self._model = LogisticRegression(
+                max_iter=1000,
+                random_state=self.seed if self.seed is not None else 42,
+            )
         else:
             raise ValueError(f"Unknown model: {self.model_type}")
 
@@ -248,10 +255,12 @@ class BoomAwareQualityPredictor:
         frame_model=None,
         window_size: int = 50,
         model: str = 'hist_gbm',
+        seed: int | None = None,
     ):
         self.frame_model = frame_model
         self.window_size = window_size
         self.model_type = model
+        self.seed = seed
         self._quality_model = None
         self._feature_mean = None
         self._feature_std = None
@@ -329,7 +338,7 @@ class BoomAwareQualityPredictor:
             self._quality_model = HistGradientBoostingRegressor(
                 max_iter=100,
                 max_depth=5,
-                random_state=42,
+                random_state=self.seed if self.seed is not None else 42,
             )
         else:
             from sklearn.linear_model import Ridge

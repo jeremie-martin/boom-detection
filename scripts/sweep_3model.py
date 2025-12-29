@@ -3,10 +3,11 @@
 Sweep 3-model pipeline parameters.
 
 Uses CNN + HGB + LSTM models with `std` disagreement metric.
-The key finding is that 3-model with `std` metric WORKS, achieving MAE 3.27 at 12.2%.
-
 The `std` metric (standard deviation) is more robust than `range` (max-min) when
 the LSTM model occasionally disagrees with CNN/HGB.
+
+NOTE: With PRODUCTION_CONFIG, 3-model does NOT improve over 2-model.
+See CLAUDE.md for current best results.
 
 The key insight is that TESTING COMBINERS IS FREE - models are trained once,
 then combiners can be swapped instantly.

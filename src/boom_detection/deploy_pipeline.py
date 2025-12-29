@@ -99,6 +99,7 @@ class BoomDetectionPipeline:
         calibrate_quality: bool = True,
         frame_models: tuple[str | FrameModelConfig, ...] = ('cnn', 'hgb'),
         feature_config: FeatureConfig | None = None,
+        jitter_std: float = 5.0,
     ):
         """
         Initialize boom detection pipeline.
@@ -118,6 +119,8 @@ class BoomDetectionPipeline:
                            ('cnn', 'hgb', FrameModelConfig('hgb', 0.5))  # With specialized
                            ('cnn', 'hgb_0.5')  # String shorthand for specialized
             feature_config: Feature extraction config (saved with model)
+            jitter_std: Std dev for jitter added to boom frame during quality model training.
+                       Simulates prediction noise to prevent train/inference mismatch.
         """
         # Normalize frame_models to FrameModelConfig instances
         self.model_configs = normalize_model_configs(frame_models)
@@ -154,6 +157,7 @@ class BoomDetectionPipeline:
         # Keep frame_models as tuple of strings for backward compatibility
         self.frame_models = tuple(cfg.key for cfg in self.model_configs)
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
+        self.jitter_std = jitter_std
 
         # Trained models (set during fit)
         # Key is the model's unique key (e.g., 'cnn', 'hgb', 'hgb_0.5')
@@ -260,7 +264,7 @@ class BoomDetectionPipeline:
         start = time.time()
         model = LSTMClassifier(
             n_features=self.n_features,
-            hidden_dim=128,
+            hidden_dim=64,  # Match CNN hidden_dim for consistency
             n_layers=2,
             dropout=0.3,
         )
@@ -299,15 +303,17 @@ class BoomDetectionPipeline:
 
         # Add jitter to boom frame during training to simulate prediction noise
         # This prevents train/inference mismatch since at inference we use predicted boom
-        jitter_std = 5  # Standard deviation of jitter (typical model error is ~5-10 frames)
         rng = np.random.RandomState(seed)
 
         X_qual = []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
             # Add jitter to boom frame to simulate prediction uncertainty
-            jittered_boom = int(boom + rng.normal(0, jitter_std))
-            jittered_boom = max(0, min(jittered_boom, len(feats) - 1))
+            if self.jitter_std > 0:
+                jittered_boom = int(boom + rng.normal(0, self.jitter_std))
+                jittered_boom = max(0, min(jittered_boom, len(feats) - 1))
+            else:
+                jittered_boom = int(boom)
 
             start = max(0, jittered_boom - self.quality_window)
             end = min(len(feats), jittered_boom + self.quality_window)
@@ -332,17 +338,13 @@ class BoomDetectionPipeline:
         # Optional: Calibrate quality predictions using isotonic regression
         if self.calibrate_quality:
             from sklearn.isotonic import IsotonicRegression
+            from sklearn.model_selection import cross_val_predict
 
-            # Get out-of-bag predictions for calibration (leave-one-out)
-            raw_predictions = np.zeros(len(qualities))
-            for i in range(len(X_qual_selected)):
-                mask = np.ones(len(X_qual_selected), dtype=bool)
-                mask[i] = False
-                temp_model = RandomForestRegressor(
-                    n_estimators=50, max_depth=5, random_state=seed
-                )
-                temp_model.fit(X_qual_selected[mask], qualities[mask])
-                raw_predictions[i] = temp_model.predict([X_qual_selected[i]])[0]
+            # Get out-of-fold predictions for calibration (5-fold CV is much faster than LOO)
+            raw_predictions = cross_val_predict(
+                RandomForestRegressor(n_estimators=50, max_depth=5, random_state=seed),
+                X_qual_selected, qualities, cv=5
+            )
 
             # Fit isotonic regression calibrator
             self.quality_calibrator = IsotonicRegression(
@@ -535,6 +537,7 @@ class BoomDetectionPipeline:
             'n_features': self.n_features,
             'quality_feature_indices': self.quality_feature_indices,
             'calibrate_quality': self.calibrate_quality,
+            'jitter_std': self.jitter_std,
         }
         with open(path / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
@@ -597,6 +600,7 @@ class BoomDetectionPipeline:
             calibrate_quality=config.get('calibrate_quality', False),
             frame_models=model_configs,
             feature_config=feature_config,
+            jitter_std=config.get('jitter_std', 5.0),  # Default for backward compat
         )
 
         pipeline.n_features = config['n_features']
@@ -838,7 +842,7 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.60,
                         help='Accept score threshold (0-1, default 0.60)')
     parser.add_argument('--production', action='store_true',
-                        help='Use PRODUCTION_CONFIG with caustic features (recommended)')
+                        help='Use PRODUCTION_CONFIG (max_pendulums=2000, no caustic features)')
     parser.add_argument('--save-run', type=Path, default=None,
                         help='Save evaluation results to directory (auto-named if "auto")')
     parser.add_argument('--predict', type=Path, default=None,
@@ -856,7 +860,7 @@ def main():
     # Build feature cache
     print("Building feature cache...")
     if args.production:
-        print("Using PRODUCTION_CONFIG with caustic features")
+        print("Using PRODUCTION_CONFIG (max_pendulums=2000, no caustic features)")
         config = PRODUCTION_CONFIG
     else:
         config = FeatureConfig()

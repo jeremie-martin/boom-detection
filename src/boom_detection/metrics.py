@@ -35,14 +35,14 @@ class SelectivePrediction:
         accept_score: Combined confidence score (higher = more confident)
         predicted_quality: Predicted quality score (0-1)
         model_predictions: Dict of model_name -> predicted frame (e.g., {'cnn': 546, 'hgb': 542})
-        disagreement: Standard deviation of model predictions (0 = perfect agreement)
+        disagreement: Disagreement metric between model predictions (0 = perfect agreement)
     """
     boom_frame: int | None  # None if rejected
     accepted: bool
     accept_score: float
     predicted_quality: float
     model_predictions: dict[str, int]  # e.g., {'cnn': 546, 'hgb': 542, 'lstm': 548}
-    disagreement: float  # std of model predictions
+    disagreement: float  # disagreement between model predictions (typically range: max - min)
 
     @classmethod
     def from_dict(cls, d: dict) -> 'SelectivePrediction':
@@ -272,8 +272,12 @@ def compute_risk_coverage_curve(
         else:
             conf = pred.predicted_quality
 
-        # Compute error using primary model prediction
-        error = abs(pred.primary_prediction - true_booms[i])
+        # Compute error using actual combiner output (boom_frame), falling back
+        # to primary_prediction for rejected samples (where boom_frame is None)
+        if pred.boom_frame is not None:
+            error = abs(pred.boom_frame - true_booms[i])
+        else:
+            error = abs(pred.primary_prediction - true_booms[i])
 
         confidences.append(conf)
         errors.append(error)
@@ -376,7 +380,11 @@ def coverage_at_max_mae(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.primary_prediction - true_booms[i])
+        # Use actual combiner output if available
+        if pred.boom_frame is not None:
+            error = abs(pred.boom_frame - true_booms[i])
+        else:
+            error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 
@@ -430,7 +438,11 @@ def min_mae_at_coverage(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.primary_prediction - true_booms[i])
+        # Use actual combiner output if available
+        if pred.boom_frame is not None:
+            error = abs(pred.boom_frame - true_booms[i])
+        else:
+            error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 
@@ -482,7 +494,11 @@ def find_optimal_threshold(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.primary_prediction - true_booms[i])
+        # Use actual combiner output if available
+        if pred.boom_frame is not None:
+            error = abs(pred.boom_frame - true_booms[i])
+        else:
+            error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 

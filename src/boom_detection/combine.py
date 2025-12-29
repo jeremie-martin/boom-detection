@@ -284,6 +284,11 @@ class ThresholdCombiner:
 
     If primary_model is None or 'median', uses median of all model predictions
     instead of a specific model's prediction.
+
+    Score function options:
+        - 'weighted': agreement_weight * agreement + quality_weight * quality
+        - 'min': min(agreement, quality) - AND-style, both must be good
+        - 'product': agreement * quality - multiplicative, penalizes weakness in either
     """
     primary_model: str | None = 'cnn'
     threshold: float = 0.60
@@ -292,6 +297,7 @@ class ThresholdCombiner:
     disagreement_scale: float = 15.0
     disagreement_metric: str = 'range'
     agreement_transform: str = 'sqrt'
+    score_function: str = 'weighted'  # Options: 'weighted', 'min', 'product'
 
     # Cached last score for debugging/metrics
     _last_score: float = field(default=0.0, repr=False, compare=False)
@@ -312,11 +318,18 @@ class ThresholdCombiner:
             metric=self.disagreement_metric,
         )
 
-        # Compute combined score
-        self._last_score = (
-            self.agreement_weight * self._last_agreement +
-            self.quality_weight * predicted_quality
-        )
+        # Compute combined score based on score_function
+        if self.score_function == 'weighted':
+            self._last_score = (
+                self.agreement_weight * self._last_agreement +
+                self.quality_weight * predicted_quality
+            )
+        elif self.score_function == 'min':
+            self._last_score = min(self._last_agreement, predicted_quality)
+        elif self.score_function == 'product':
+            self._last_score = self._last_agreement * predicted_quality
+        else:
+            raise ValueError(f"Unknown score_function: {self.score_function}")
 
         # Accept if score >= threshold
         if self._last_score >= self.threshold:
@@ -345,6 +358,7 @@ class ThresholdCombiner:
                 'disagreement_scale': self.disagreement_scale,
                 'disagreement_metric': self.disagreement_metric,
                 'agreement_transform': self.agreement_transform,
+                'score_function': self.score_function,
             }
         }
 
@@ -375,6 +389,7 @@ class ThresholdCombiner:
             'disagreement_scale': 15.0,
             'disagreement_metric': 'range',
             'agreement_transform': 'sqrt',
+            'score_function': 'weighted',
         }
 
         # Convert single values to lists
