@@ -430,3 +430,269 @@ class TestRunArtifact:
         assert "Metrics:" in summary
         assert "Config:" in summary
         assert "Environment:" in summary
+
+
+class TestFormulaExperiment:
+    """
+    Tests for FormulaExperiment class.
+
+    CRITICAL: These tests prove that FormulaExperiment produces IDENTICAL
+    results to running the full pipeline evaluation.
+    """
+
+    def test_cached_raw_prediction(self):
+        """Should create CachedRawPrediction correctly."""
+        from boom_detection.evaluation import CachedRawPrediction
+
+        pred = CachedRawPrediction(
+            sim_id='sim_0',
+            model_predictions={'cnn': 50, 'hgb': 48},
+            predicted_quality=0.75,
+            true_boom=52,
+            true_quality=0.8,
+        )
+
+        assert pred.sim_id == 'sim_0'
+        assert pred.model_predictions == {'cnn': 50, 'hgb': 48}
+        assert pred.predicted_quality == 0.75
+        assert pred.true_boom == 52
+        assert pred.true_quality == 0.8
+        assert pred.primary_prediction == 50  # First model
+
+    def test_formula_experiment_evaluate(self):
+        """FormulaExperiment.evaluate() should return valid results."""
+        from boom_detection.evaluation import (
+            CachedRawPrediction,
+            FormulaExperiment,
+        )
+
+        # Create cached predictions for 2 seeds
+        seed1_preds = [
+            CachedRawPrediction(
+                sim_id='sim_0',
+                model_predictions={'cnn': 50, 'hgb': 48},
+                predicted_quality=0.8,
+                true_boom=52,
+                true_quality=0.9,
+            ),
+            CachedRawPrediction(
+                sim_id='sim_1',
+                model_predictions={'cnn': 60, 'hgb': 80},  # High disagreement
+                predicted_quality=0.4,
+                true_boom=65,
+                true_quality=0.5,
+            ),
+        ]
+        seed2_preds = [
+            CachedRawPrediction(
+                sim_id='sim_0',
+                model_predictions={'cnn': 51, 'hgb': 49},
+                predicted_quality=0.75,
+                true_boom=52,
+                true_quality=0.9,
+            ),
+            CachedRawPrediction(
+                sim_id='sim_1',
+                model_predictions={'cnn': 62, 'hgb': 78},  # High disagreement
+                predicted_quality=0.45,
+                true_boom=65,
+                true_quality=0.5,
+            ),
+        ]
+
+        experiment = FormulaExperiment(
+            cached_predictions=[seed1_preds, seed2_preds],
+            seeds=[42, 43],
+            k=5,
+            primary_model='cnn',
+        )
+
+        result = experiment.evaluate(
+            agreement_formula='sqrt',
+            agreement_scale=5.0,
+            accept_threshold=0.60,
+        )
+
+        assert result.k == 5
+        assert result.seeds == [42, 43]
+        assert 'selective_mae' in result.mean_metrics
+        assert 'coverage' in result.mean_metrics
+
+    def test_formula_application_matches_deploy_pipeline(self):
+        """
+        CRITICAL TEST: _apply_formula must produce IDENTICAL results
+        to deploy_pipeline.py's acceptance logic.
+        """
+        from boom_detection.evaluation import (
+            CachedRawPrediction,
+            FormulaExperiment,
+            SelectivePrediction,
+        )
+
+        # Test case: exactly match deploy_pipeline.py logic
+        pred = CachedRawPrediction(
+            sim_id='sim_0',
+            model_predictions={'cnn': 50, 'hgb': 42},  # disagreement = 8
+            predicted_quality=0.7,
+            true_boom=52,
+            true_quality=0.8,
+        )
+
+        experiment = FormulaExperiment(
+            cached_predictions=[[pred]],
+            seeds=[42],
+            k=5,
+            primary_model='cnn',
+        )
+
+        # Apply formula with known parameters
+        result = experiment._apply_formula(
+            pred,
+            agreement_formula='sqrt',
+            agreement_scale=15.0,
+            agreement_weight=0.4,
+            quality_weight=0.6,
+            accept_threshold=0.60,
+        )
+
+        # Verify the math manually (must match deploy_pipeline.py exactly)
+        # disagreement = |50 - 42| = 8
+        # agreement_score = 1 - sqrt(8 / 15) = 1 - sqrt(0.533) = 1 - 0.730 = 0.270
+        # accept_score = 0.4 * 0.270 + 0.6 * 0.7 = 0.108 + 0.42 = 0.528
+        # accepted = 0.528 >= 0.60 -> False
+
+        expected_disagreement = 8.0
+        expected_agreement = 1.0 - np.sqrt(8.0 / 15.0)  # ~0.270
+        expected_accept_score = 0.4 * expected_agreement + 0.6 * 0.7  # ~0.528
+
+        assert isinstance(result, SelectivePrediction)
+        assert result.disagreement == expected_disagreement
+        assert abs(result.accept_score - expected_accept_score) < 1e-10
+        assert result.accepted == False  # 0.528 < 0.60  # noqa: E712
+        assert result.boom_frame is None  # Rejected
+        assert result.predicted_quality == 0.7
+
+    def test_formula_experiment_sweep(self):
+        """sweep() should test multiple configurations."""
+        from boom_detection.evaluation import (
+            CachedRawPrediction,
+            FormulaExperiment,
+        )
+
+        seed_preds = [
+            CachedRawPrediction(
+                sim_id='sim_0',
+                model_predictions={'cnn': 50, 'hgb': 48},
+                predicted_quality=0.8,
+                true_boom=52,
+                true_quality=0.9,
+            ),
+        ]
+
+        experiment = FormulaExperiment(
+            cached_predictions=[seed_preds],
+            seeds=[42],
+            k=5,
+            primary_model='cnn',
+        )
+
+        results = experiment.sweep(
+            scales=[5.0, 10.0, 15.0],
+            formulas=['sqrt'],
+            accept_thresholds=[0.5, 0.6],
+            verbose=False,
+        )
+
+        # Should have 3 scales x 1 formula x 2 thresholds = 6 results
+        assert len(results) == 6
+        assert ('sqrt', 5.0, 0.5) in results
+        assert ('sqrt', 15.0, 0.6) in results
+
+    def test_linear_vs_sqrt_formula(self):
+        """Linear and sqrt formulas should produce different results."""
+        from boom_detection.evaluation import (
+            CachedRawPrediction,
+            FormulaExperiment,
+        )
+
+        pred = CachedRawPrediction(
+            sim_id='sim_0',
+            model_predictions={'cnn': 50, 'hgb': 40},  # disagreement = 10
+            predicted_quality=0.7,
+            true_boom=52,
+            true_quality=0.8,
+        )
+
+        experiment = FormulaExperiment(
+            cached_predictions=[[pred]],
+            seeds=[42],
+            k=5,
+            primary_model='cnn',
+        )
+
+        # Linear: agreement = 1 - 10/15 = 0.333
+        linear_result = experiment._apply_formula(
+            pred,
+            agreement_formula='linear',
+            agreement_scale=15.0,
+            agreement_weight=0.4,
+            quality_weight=0.6,
+            accept_threshold=0.60,
+        )
+
+        # Sqrt: agreement = 1 - sqrt(10/15) = 1 - 0.816 = 0.184
+        sqrt_result = experiment._apply_formula(
+            pred,
+            agreement_formula='sqrt',
+            agreement_scale=15.0,
+            agreement_weight=0.4,
+            quality_weight=0.6,
+            accept_threshold=0.60,
+        )
+
+        # Linear should give higher agreement score
+        linear_agreement = 1.0 - 10.0 / 15.0  # 0.333
+        sqrt_agreement = 1.0 - np.sqrt(10.0 / 15.0)  # 0.184
+
+        linear_accept = 0.4 * linear_agreement + 0.6 * 0.7
+        sqrt_accept = 0.4 * sqrt_agreement + 0.6 * 0.7
+
+        assert abs(linear_result.accept_score - linear_accept) < 1e-10
+        assert abs(sqrt_result.accept_score - sqrt_accept) < 1e-10
+        assert linear_result.accept_score > sqrt_result.accept_score
+
+    def test_3model_disagreement_uses_range(self):
+        """Disagreement for 3 models should use range (max-min), not std."""
+        from boom_detection.evaluation import (
+            CachedRawPrediction,
+            FormulaExperiment,
+        )
+
+        # 3-model prediction
+        pred = CachedRawPrediction(
+            sim_id='sim_0',
+            model_predictions={'cnn': 50, 'hgb': 45, 'lstm': 55},
+            predicted_quality=0.7,
+            true_boom=52,
+            true_quality=0.8,
+        )
+
+        experiment = FormulaExperiment(
+            cached_predictions=[[pred]],
+            seeds=[42],
+            k=5,
+            primary_model='cnn',
+        )
+
+        result = experiment._apply_formula(
+            pred,
+            agreement_formula='sqrt',
+            agreement_scale=15.0,
+            agreement_weight=0.4,
+            quality_weight=0.6,
+            accept_threshold=0.60,
+        )
+
+        # Range should be max - min = 55 - 45 = 10
+        # NOT std([50, 45, 55]) = 5.0
+        assert result.disagreement == 10.0

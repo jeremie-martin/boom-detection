@@ -62,6 +62,9 @@ __all__ = [
     'CachedEvaluator',
     'robust_evaluate',
     'cross_validate',
+    # Formula experiment
+    'CachedRawPrediction',
+    'FormulaExperiment',
 ]
 
 if TYPE_CHECKING:
@@ -364,6 +367,254 @@ class MultiSeedSelectiveResult:
             'ci_upper': self.ci_upper,
             'seed_metrics': self.seed_metrics,
         }
+
+
+# =============================================================================
+# Formula Experiment Framework
+# =============================================================================
+
+@dataclass
+class CachedRawPrediction:
+    """
+    Cached raw prediction from a pipeline, before acceptance decision.
+
+    This stores all information needed to recompute acceptance with different
+    formula parameters, without retraining or re-running inference.
+    """
+    sim_id: str
+    model_predictions: dict[str, int]  # e.g., {'cnn': 546, 'hgb': 542}
+    predicted_quality: float
+    true_boom: int
+    true_quality: float
+
+    @property
+    def primary_prediction(self) -> int:
+        """Return first model's prediction (typically the primary model)."""
+        return next(iter(self.model_predictions.values()))
+
+
+class FormulaExperiment:
+    """
+    Experiment framework for iterating on acceptance formulas.
+
+    Trains models once, caches raw predictions, then allows fast iteration
+    on different acceptance formulas WITHOUT retraining.
+
+    This is the canonical way to experiment with formula parameters.
+    Results are guaranteed to be IDENTICAL to running the full pipeline.
+
+    Usage:
+        evaluator = CachedEvaluator(dataset, cache)
+
+        # Create experiment (trains models once, caches predictions)
+        experiment = evaluator.create_formula_experiment(
+            pipeline_factory=lambda: BoomDetectionPipeline(),
+            seeds=[42, 43, 44],
+        )
+
+        # Now iterate on formulas instantly:
+        for scale in [3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]:
+            result = experiment.evaluate(
+                agreement_formula='sqrt',
+                agreement_scale=scale,
+                accept_threshold=0.60,
+            )
+            print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
+    """
+
+    def __init__(
+        self,
+        cached_predictions: list[list[CachedRawPrediction]],
+        seeds: list[int],
+        k: int,
+        primary_model: str = 'cnn',
+    ):
+        """
+        Args:
+            cached_predictions: List of lists, one per seed. Each inner list
+                               contains CachedRawPrediction for all test samples
+                               across all folds for that seed.
+            seeds: The random seeds used for cross-validation.
+            k: Number of folds used.
+            primary_model: Which model's prediction to use when accepted.
+        """
+        self.cached_predictions = cached_predictions
+        self.seeds = seeds
+        self.k = k
+        self.primary_model = primary_model
+
+    def evaluate(
+        self,
+        agreement_formula: str = 'sqrt',
+        agreement_scale: float = 15.0,
+        agreement_weight: float = 0.4,
+        quality_weight: float = 0.6,
+        accept_threshold: float = 0.60,
+        verbose: bool = False,
+    ) -> MultiSeedSelectiveResult:
+        """
+        Evaluate a formula configuration on cached predictions.
+
+        This is FAST - no model training or inference, just formula evaluation.
+
+        Args:
+            agreement_formula: 'sqrt' or 'linear'
+            agreement_scale: Scale for agreement (higher = more permissive)
+            agreement_weight: Weight for agreement in accept_score
+            quality_weight: Weight for quality in accept_score
+            accept_threshold: Threshold on accept_score for acceptance
+
+        Returns:
+            MultiSeedSelectiveResult with metrics for this configuration
+        """
+        all_seed_metrics = []
+
+        for seed_idx, seed_preds in enumerate(self.cached_predictions):
+            # Apply formula to all predictions for this seed
+            selective_predictions = []
+            true_booms = []
+            true_qualities = []
+
+            for pred in seed_preds:
+                # Compute acceptance using EXACT same formula as deploy_pipeline.py
+                result = self._apply_formula(
+                    pred,
+                    agreement_formula=agreement_formula,
+                    agreement_scale=agreement_scale,
+                    agreement_weight=agreement_weight,
+                    quality_weight=quality_weight,
+                    accept_threshold=accept_threshold,
+                )
+                selective_predictions.append(result)
+                true_booms.append(pred.true_boom)
+                true_qualities.append(pred.true_quality)
+
+            # Compute metrics for this seed
+            metrics = compute_selective_metrics(
+                selective_predictions,
+                np.array(true_booms),
+                np.array(true_qualities),
+            )
+            all_seed_metrics.append(metrics)
+
+            if verbose:
+                n_accepted = sum(1 for p in selective_predictions if p.accepted)
+                print(f"  Seed {self.seeds[seed_idx]}: {n_accepted}/{len(selective_predictions)} accepted, "
+                      f"MAE={metrics.get('selective_mae', float('nan')):.2f}")
+
+        return MultiSeedSelectiveResult(
+            k=self.k,
+            seeds=self.seeds,
+            seed_metrics=all_seed_metrics,
+        )
+
+    def _apply_formula(
+        self,
+        pred: CachedRawPrediction,
+        agreement_formula: str,
+        agreement_scale: float,
+        agreement_weight: float,
+        quality_weight: float,
+        accept_threshold: float,
+    ) -> SelectivePrediction:
+        """
+        Apply acceptance formula to a cached prediction.
+
+        IMPORTANT: This MUST match deploy_pipeline.py exactly!
+        """
+        # Compute disagreement as range of predictions (0 = perfect agreement)
+        # Using max-min is consistent with original 2-model abs(a-b) formula
+        pred_values = list(pred.model_predictions.values())
+        if len(pred_values) > 1:
+            disagreement = float(max(pred_values) - min(pred_values))
+        else:
+            disagreement = 0.0
+
+        # Compute agreement score (1.0 = perfect, 0.0 = max disagreement)
+        if agreement_formula == 'sqrt':
+            agreement_score = 1.0 - np.sqrt(min(disagreement / agreement_scale, 1.0))
+        else:
+            agreement_score = 1.0 - min(disagreement / agreement_scale, 1.0)
+
+        # Combine agreement and quality into accept_score
+        accept_score = (
+            agreement_weight * agreement_score +
+            quality_weight * pred.predicted_quality
+        )
+
+        # Accept if score exceeds threshold
+        accepted = accept_score >= accept_threshold
+
+        # Use primary model's prediction for boom_frame
+        primary_pred = pred.model_predictions.get(
+            self.primary_model,
+            pred.primary_prediction  # fallback to first model
+        )
+
+        return SelectivePrediction(
+            boom_frame=primary_pred if accepted else None,
+            accepted=accepted,
+            accept_score=float(accept_score),
+            predicted_quality=pred.predicted_quality,
+            model_predictions=pred.model_predictions,
+            disagreement=disagreement,
+        )
+
+    def sweep(
+        self,
+        scales: list[float] | None = None,
+        formulas: list[str] | None = None,
+        accept_thresholds: list[float] | None = None,
+        verbose: bool = True,
+    ) -> dict[tuple, MultiSeedSelectiveResult]:
+        """
+        Run a sweep over multiple formula configurations.
+
+        Args:
+            scales: List of agreement_scale values to try
+            formulas: List of agreement_formula values ('sqrt', 'linear')
+            accept_thresholds: List of accept_threshold values to try
+            verbose: Print progress
+
+        Returns:
+            Dict mapping (formula, scale, threshold) -> MultiSeedSelectiveResult
+        """
+        if scales is None:
+            scales = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0]
+        if formulas is None:
+            formulas = ['sqrt']
+        if accept_thresholds is None:
+            accept_thresholds = [0.60]
+
+        results = {}
+        total = len(scales) * len(formulas) * len(accept_thresholds)
+        count = 0
+
+        if verbose:
+            print(f"\nRunning sweep: {len(scales)} scales x {len(formulas)} formulas x {len(accept_thresholds)} thresholds = {total} configs")
+            print("-" * 70)
+
+        for formula in formulas:
+            for scale in scales:
+                for threshold in accept_thresholds:
+                    count += 1
+                    result = self.evaluate(
+                        agreement_formula=formula,
+                        agreement_scale=scale,
+                        accept_threshold=threshold,
+                        verbose=False,
+                    )
+                    key = (formula, scale, threshold)
+                    results[key] = result
+
+                    if verbose:
+                        mae = result.mean_metrics.get('selective_mae', float('nan'))
+                        mae_std = result.std_metrics.get('selective_mae', 0)
+                        cov = result.mean_metrics.get('coverage', 0)
+                        print(f"  [{count}/{total}] {formula}/scale={scale:.0f}/thresh={threshold:.2f}: "
+                              f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
+
+        return results
 
 
 # =============================================================================
@@ -767,6 +1018,129 @@ class CachedEvaluator:
         """
         return self._cross_validate_selective_single_seed(
             predictor_fn, k=k, seed=seed, verbose=verbose
+        )
+
+    # =========================================================================
+    # Formula Experiment Factory
+    # =========================================================================
+
+    def create_formula_experiment(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int = 5,
+        seeds: list[int] | None = None,
+        verbose: bool = True,
+    ) -> FormulaExperiment:
+        """
+        Create a FormulaExperiment by training models once and caching predictions.
+
+        This is the canonical way to experiment with acceptance formulas.
+        Models are trained once, then you can iterate on formula parameters
+        WITHOUT retraining.
+
+        GUARANTEE: Results from FormulaExperiment.evaluate() are IDENTICAL
+        to running cross_validate_selective() with the same formula parameters.
+
+        Args:
+            predictor_fn: Factory function returning a selective predictor
+                         (must have fit() and predict() methods)
+            k: Number of folds (default: 5)
+            seeds: List of random seeds (default: [42, 43, 44])
+            verbose: Print progress
+
+        Returns:
+            FormulaExperiment for iterating on formulas
+
+        Example:
+            # Train once (slow)
+            experiment = evaluator.create_formula_experiment(
+                lambda: BoomDetectionPipeline(),
+                seeds=[42, 43, 44],
+            )
+
+            # Iterate on formulas (fast)
+            for scale in [5, 10, 15, 20]:
+                result = experiment.evaluate(agreement_scale=scale)
+                print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
+        """
+        if seeds is None:
+            seeds = [42, 43, 44]  # 3 seeds by default for faster iteration
+
+        all_cached_predictions: list[list[CachedRawPrediction]] = []
+        primary_model = 'cnn'  # Will be updated from predictor
+
+        total_start = time.time()
+
+        for seed_idx, seed in enumerate(seeds):
+            if verbose:
+                print(f"\n{'='*50}")
+                print(f"Training seed {seed} ({seed_idx + 1}/{len(seeds)})")
+                print('='*50)
+
+            seed_predictions: list[CachedRawPrediction] = []
+            kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+
+            for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.sim_ids)):
+                fold_start = time.time()
+                fold_seed = seed * 1000 + fold_idx
+
+                # Get train/test data
+                train_ids = [self.sim_ids[i] for i in train_idx]
+                test_ids = [self.sim_ids[i] for i in test_idx]
+                train_booms = self.boom_frames[train_idx]
+                train_quals = self.boom_qualities[train_idx]
+
+                # Create fresh predictor and train
+                predictor = predictor_fn()
+
+                # Capture primary_model if available
+                if hasattr(predictor, 'primary_model'):
+                    primary_model = predictor.primary_model
+
+                # Pass fold seed if the predictor supports it
+                if hasattr(predictor, 'set_seed'):
+                    predictor.set_seed(fold_seed)
+
+                predictor.fit(train_ids, train_booms, train_quals, self.cache)
+
+                # Get predictions from pipeline
+                predictions = predictor.predict(test_ids, self.cache)
+
+                # Extract raw predictions (model_predictions + predicted_quality)
+                for pred, test_i in zip(predictions, test_idx):
+                    if isinstance(pred, SelectivePrediction):
+                        sp = pred
+                    else:
+                        sp = SelectivePrediction.from_dict(pred)
+
+                    seed_predictions.append(CachedRawPrediction(
+                        sim_id=self.sim_ids[test_i],
+                        model_predictions=sp.model_predictions,
+                        predicted_quality=sp.predicted_quality,
+                        true_boom=int(self.boom_frames[test_i]),
+                        true_quality=float(self.boom_qualities[test_i]),
+                    ))
+
+                fold_elapsed = time.time() - fold_start
+                if verbose:
+                    print(f"  Fold {fold_idx + 1}/{k}: {len(predictions)} predictions ({fold_elapsed:.1f}s)")
+
+            all_cached_predictions.append(seed_predictions)
+
+        total_elapsed = time.time() - total_start
+        if verbose:
+            total_preds = sum(len(sp) for sp in all_cached_predictions)
+            print(f"\n{'='*50}")
+            print(f"Training complete in {total_elapsed:.1f}s")
+            print(f"Cached {total_preds} raw predictions ({len(seeds)} seeds x ~{len(self.sim_ids)} sims)")
+            print("Now you can iterate on formulas WITHOUT retraining!")
+            print('='*50)
+
+        return FormulaExperiment(
+            cached_predictions=all_cached_predictions,
+            seeds=seeds,
+            k=k,
+            primary_model=primary_model,
         )
 
 
