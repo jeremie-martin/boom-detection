@@ -100,6 +100,7 @@ class BoomDetectionPipeline:
         frame_models: tuple[str | FrameModelConfig, ...] = ('cnn', 'hgb'),
         feature_config: FeatureConfig | None = None,
         jitter_std: float = 5.0,
+        use_class_weights: bool = False,
     ):
         """
         Initialize boom detection pipeline.
@@ -121,6 +122,8 @@ class BoomDetectionPipeline:
             feature_config: Feature extraction config (saved with model)
             jitter_std: Std dev for jitter added to boom frame during quality model training.
                        Simulates prediction noise to prevent train/inference mismatch.
+            use_class_weights: Apply class weights to HGB training to address imbalance
+                              between before-boom and after-boom frames (default: False).
         """
         # Normalize frame_models to FrameModelConfig instances
         self.model_configs = normalize_model_configs(frame_models)
@@ -158,6 +161,7 @@ class BoomDetectionPipeline:
         self.frame_models = tuple(cfg.key for cfg in self.model_configs)
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
         self.jitter_std = jitter_std
+        self.use_class_weights = use_class_weights
 
         # Trained models (set during fit)
         # Key is the model's unique key (e.g., 'cnn', 'hgb', 'hgb_0.5')
@@ -290,10 +294,27 @@ class BoomDetectionPipeline:
                 X_train.append(feats[t])
                 y_train.append(1 if t >= boom else 0)
 
+        X_train = np.array(X_train)
+        y_train = np.array(y_train)
+
+        # Compute sample weights if enabled
+        sample_weight = None
+        if self.use_class_weights:
+            # Compute class weights inversely proportional to frequency
+            n_class_0 = np.sum(y_train == 0)
+            n_class_1 = np.sum(y_train == 1)
+            n_total = len(y_train)
+            # Weight = n_samples / (n_classes * n_samples_in_class)
+            weight_0 = n_total / (2.0 * n_class_0) if n_class_0 > 0 else 1.0
+            weight_1 = n_total / (2.0 * n_class_1) if n_class_1 > 0 else 1.0
+            sample_weight = np.where(y_train == 0, weight_0, weight_1)
+            logger.debug("HGB class weights: class_0={:.2f} (n={}), class_1={:.2f} (n={})",
+                        weight_0, n_class_0, weight_1, n_class_1)
+
         model = HistGradientBoostingClassifier(
             max_iter=200, max_depth=7, random_state=seed
         )
-        model.fit(np.array(X_train), np.array(y_train))
+        model.fit(X_train, y_train, sample_weight=sample_weight)
         self.trained_models[model_key] = model
         logger.debug("HistGBM '{}' trained in {:.1f}s on {} frames", model_key, time.time() - start, len(X_train))
 
