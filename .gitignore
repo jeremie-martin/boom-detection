@@ -32,3 +32,9 @@ htmlcov/
 Thumbs.db
 .feature_cache/
 models/
+
+tmp_dataset*
+runs/
+runs_old
+data_2k
+data_full
