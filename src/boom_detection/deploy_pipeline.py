@@ -658,8 +658,12 @@ def main():
     parser.add_argument('--quick', action='store_true', help='Quick single-seed evaluation')
     parser.add_argument('--train', action='store_true', help='Train and save models')
     parser.add_argument('--output', type=Path, help='Output directory for models')
-    parser.add_argument('--accept-threshold', type=float, default=0.53,
-                        help='Accept score threshold (0-1, default 0.53)')
+    parser.add_argument('--accept-threshold', type=float, default=0.60,
+                        help='Accept score threshold (0-1, default 0.60)')
+    parser.add_argument('--agreement-formula', choices=['linear', 'sqrt'], default='sqrt',
+                        help='Agreement formula: linear or sqrt (default: sqrt)')
+    parser.add_argument('--agreement-scale', type=float, default=15.0,
+                        help='Agreement scale (default: 15 for sqrt, 10 for linear)')
     parser.add_argument('--production', action='store_true',
                         help='Use PRODUCTION_CONFIG with caustic features (recommended)')
     parser.add_argument('--save-run', type=Path, default=None,
@@ -800,14 +804,22 @@ def main():
             parser.error("--output required when using --train")
 
         print("\nTraining final models...")
+        print(f"  accept_threshold: {args.accept_threshold}")
+        print(f"  agreement_formula: {args.agreement_formula}")
+        print(f"  agreement_scale: {args.agreement_scale}")
+
         pipeline = BoomDetectionPipeline(
             accept_threshold=args.accept_threshold,
+            agreement_formula=args.agreement_formula,
+            agreement_scale=args.agreement_scale,
+            calibrate_quality=True,
+            feature_config=config,
         )
         pipeline.fit(sim_ids, boom_frames, qualities, cache)
 
-        # Save models using the new save method
+        # Save models
         pipeline.save(args.output)
-        print(f"Models saved to {args.output}")
+        print(f"\nModels saved to {args.output}")
 
     if args.predict:
         # Inference mode: load pretrained models and predict
