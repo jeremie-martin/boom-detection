@@ -144,10 +144,11 @@ def main():
     mode = "quick (1 seed)" if args.quick else "robust (3 seeds)"
 
     # Scales to evaluate
-    # For 2-model: std of 2 values is ~0.5× the abs diff, so similar scale works
-    # For 3-model: std is more meaningful, try range of scales
-    scales_2model = [15.0]  # Current default
-    scales_3model = [10.0, 12.0, 15.0]  # Range to find optimal
+    # Lower scale = more selective (rejects when disagreement is lower)
+    # For 2-model: use documented configs for comparison
+    # For 3-model: test range from selective to permissive
+    scales_2model = [5.0, 10.0, 15.0]  # Selective, default, balanced
+    scales_3model = [5.0, 8.0, 10.0, 12.0, 15.0]  # Wide range to find optimal
 
     print("=" * 70)
     print("3-MODEL PIPELINE EVALUATION")
