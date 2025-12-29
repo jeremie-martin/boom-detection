@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from boom_detection.loader import load_dataset
-from boom_detection.features import FeatureCache, FeatureConfig
+from boom_detection.features import FeatureCache, PRODUCTION_CONFIG
 from boom_detection.logging_config import log_memory_usage
 from boom_detection.evaluation import CachedEvaluator
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
@@ -381,10 +381,9 @@ def main():
     dataset = load_dataset(args.data_path, verbose=False)
     log_memory_usage("after loading")
 
-    # Build feature cache
+    # Build feature cache (using PRODUCTION_CONFIG for consistency)
     print("Extracting features...")
-    config = FeatureConfig()
-    cache = FeatureCache(config, cache_dir='.feature_cache')
+    cache = FeatureCache(PRODUCTION_CONFIG, cache_dir='.feature_cache/no_caustic')
     cache.extract_all(dataset, verbose=False)
     dataset.release_simulation_data()
     gc.collect()

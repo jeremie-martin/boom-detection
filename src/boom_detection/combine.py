@@ -175,8 +175,11 @@ class ThresholdCombiner:
     then accepts if score >= threshold and returns the primary model's prediction.
 
     This is the main combiner for production use.
+
+    If primary_model is None or 'median', uses median of all model predictions
+    instead of a specific model's prediction.
     """
-    primary_model: str = 'cnn'
+    primary_model: str | None = 'cnn'
     threshold: float = 0.60
     agreement_weight: float = 0.4
     quality_weight: float = 0.6
@@ -211,6 +214,8 @@ class ThresholdCombiner:
 
         # Accept if score >= threshold
         if self._last_score >= self.threshold:
+            if self.primary_model is None or self.primary_model == 'median':
+                return median_frame(predictions)
             return get_prediction(predictions, self.primary_model).frame
         return None
 
@@ -372,6 +377,45 @@ class QualityGatedCombiner:
 
 
 @dataclass
+class QualityGatedModelCombiner:
+    """
+    Accept if predicted quality >= threshold, use a specific model's prediction.
+
+    This tests whether agreement helps PREDICTION even when using quality-only
+    for ACCEPTANCE. Allows choosing the best individual model for final output.
+
+    If primary_model is None or 'median', uses median of all predictions.
+    """
+    threshold: float = 0.7
+    primary_model: str | None = 'cnn'
+
+    def __call__(
+        self,
+        predictions: list[ModelPrediction],
+        predicted_quality: float,
+        features: np.ndarray | None = None,
+    ) -> int | None:
+        if predicted_quality >= self.threshold:
+            if self.primary_model is None or self.primary_model == 'median':
+                return median_frame(predictions)
+            return get_prediction(predictions, self.primary_model).frame
+        return None
+
+    def to_config(self) -> dict:
+        return {
+            'type': 'QualityGatedModelCombiner',
+            'params': {
+                'threshold': self.threshold,
+                'primary_model': self.primary_model,
+            }
+        }
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'QualityGatedModelCombiner':
+        return cls(**config['params'])
+
+
+@dataclass
 class AgreementGatedCombiner:
     """
     Accept if disagreement <= threshold, use median.
@@ -468,6 +512,7 @@ COMBINER_REGISTRY: dict[str, type] = {
     'MedianCombiner': MedianCombiner,
     'NamedModelCombiner': NamedModelCombiner,
     'QualityGatedCombiner': QualityGatedCombiner,
+    'QualityGatedModelCombiner': QualityGatedModelCombiner,
     'AgreementGatedCombiner': AgreementGatedCombiner,
     'MajorityVoteCombiner': MajorityVoteCombiner,
 }

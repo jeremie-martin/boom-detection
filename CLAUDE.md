@@ -11,27 +11,26 @@ This means:
 - Rejecting low-quality simulations is acceptable (can generate more)
 - For accepted simulations, we want accurate boom detection
 
-**Current best (90 simulations, 3-seed evaluation)**:
+**Current best (90 simulations, 3-seed evaluation, PRODUCTION_CONFIG)**:
 
-*3-model pipeline (CNN + HGB + LSTM) with std metric - NEW BEST:*
-- **Most selective (std/5)**: MAE 3.27 ± 0.56 frames at 12.2% coverage
+*2-model pipeline (CNN + HGB) - RECOMMENDED:*
+- Most selective (sqrt/5): MAE 3.38 ± 0.83 frames at 13.7% coverage
+- Balanced (sqrt/10): MAE 4.90 ± 1.16 frames at 22.2% coverage
+- Permissive (sqrt/15): MAE 4.86 ± 1.28 frames at 30.4% coverage
 
-*2-model pipeline (CNN + HGB) - simpler alternative:*
-- Most selective (sqrt/5): MAE 3.4 ± 0.8 frames at 14% coverage
-- Balanced (sqrt/10): MAE 4.9 ± 1.2 frames at 22% coverage
-- Permissive (sqrt/15): MAE 4.9 ± 1.3 frames at 30% coverage
+*Quality-only baseline - simplest and competitive:*
+- QualityGatedCombiner(0.7): MAE 3.35 ± 1.39 at 12.2% coverage
 
-*Quality-only baseline - simplest:*
-- QualityGatedCombiner(0.7): MAE 4.38 ± 1.53 at 12.2% coverage
-
-**Key finding (Dec 2025 update)**: 3-model with `std` metric works! Using `disagreement_metric='std'` instead of `'range'` resolves the inflation problem. The extra LSTM model now improves accuracy.
+*3-model pipeline (CNN + HGB + LSTM) - NOT recommended:*
+- With std/5: MAE 5.57 ± 1.93 at 11.9% (worse than 2-model)
 
 **Key findings from comprehensive evaluation (Dec 2025)**:
 - HGB alone: MAE 22.5 ± 0.6 frames (37% within 5 frames)
 - LSTM alone: MAE 18.3 ± 1.6 frames (best individual model)
 - CNN alone: MAE 20.2 ± 1.5 frames
 - Caustic features do NOT improve the pipeline (no_caustic baseline is best)
-- 3-model (CNN+HGB+LSTM) does NOT outperform 2-model (additional model adds noise to agreement)
+- 3-model (CNN+HGB+LSTM) does NOT outperform 2-model with PRODUCTION_CONFIG
+- QualityGatedCombiner(0.7) is surprisingly competitive with ThresholdCombiner
 
 **Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
@@ -309,14 +308,15 @@ result = evaluate(dataset, cache)
 
 ## Key Findings
 
-1. **Quality prediction is more important than agreement** - Weights 0.2/0.8 beat 0.4/0.6; agreement-only gating is poor
-2. **Use CNN for final prediction** - CNN is more accurate than HGB or average
-3. **3-model with `std` metric IS optimal** - MAE 3.27 vs 3.38 for 2-model (use `disagreement_metric='std'`)
-4. **scale=5 achieves MAE 3.4 at 14% coverage** - best accuracy when being selective (2-model)
+1. **2-model pipeline is optimal** - 3-model does NOT improve over 2-model with PRODUCTION_CONFIG
+2. **Quality-only gating is highly competitive** - QualityGatedCombiner(0.7) achieves MAE 3.35 at 12.2%
+3. **Use CNN for final prediction** - CNN is more accurate than HGB or median
+4. **scale=5 achieves MAE 3.38 at 13.7% coverage** - best accuracy when being selective (2-model)
 5. **LSTM is the best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
 6. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
 7. **Caustic features do NOT improve the pipeline** - all tested formulas performed worse than no_caustic baseline
-8. **Quality-only gating is surprisingly effective** - QualityGatedCombiner(0.7) achieves MAE 4.38 at 12.2%
+8. **Agreement helps at moderate coverage** - 0.4/0.6 weights beat quality-only at 30% coverage
+9. **PRODUCTION_CONFIG is required** - Use `max_pendulums=2000, include_caustic=False` for consistent results
 
 ## Acceptance Formula Characterization
 
@@ -353,41 +353,31 @@ The relationship is **monotonic but non-linear** with diminishing returns at ext
 - **linear**: Simple, slightly worse at low coverage
 - **quadratic**: Similar to sqrt
 
-### 3-Model Now Works (with `std` metric)
+### 3-Model vs 2-Model (PRODUCTION_CONFIG)
 
-The original 3-model experiments failed because `range` (max-min) inflates with more models. **Using `std` instead resolves this**:
+**Important**: 3-model does NOT improve over 2-model when using PRODUCTION_CONFIG (max_pendulums=2000).
 
 | Configuration | MAE | Coverage | Notes |
 |---------------|-----|----------|-------|
-| 3-model with `std`, scale=5 | **3.27 ± 0.56** | 12.2% | **NEW BEST** |
-| 2-model with `range`, scale=5 | 3.38 ± 0.83 | 13.7% | Previous best |
-| 3-model with `range`, scale=10 | 3.77 ± 0.55 | 8.9% | Also works |
+| 2-model range/scale=5 | **3.38 ± 0.83** | 13.7% | **BEST** |
+| QualityGated(0.7) | 3.35 ± 1.39 | 12.2% | Simplest, competitive |
+| 3-model std/scale=5 | 5.57 ± 1.93 | 11.9% | NOT recommended |
+| 3-model range/scale=30 | 5.17 ± 0.68 | 34.8% | Worse than 2-model |
 
-**Why std works**:
-- `range` = max - min → inflates when LSTM disagrees (outlier effect)
-- `std` = standard deviation → robust to outliers
-- The 3-model disagreement correlates better with error (r=0.56 vs r=0.44), and `std` captures this
+**Why 3-model doesn't help with PRODUCTION_CONFIG**:
+- With subsampled pendulums (max_pendulums=2000), LSTM predictions are less stable
+- The additional model adds noise rather than signal to the agreement metric
+- 2-model pipeline is simpler and more accurate
 
-**To use 3-model**:
-```python
-pipeline = BoomDetectionPipeline(
-    frame_models=('cnn', 'hgb', 'lstm'),
-    combiner=ThresholdCombiner(
-        disagreement_metric='std',  # Key change!
-        disagreement_scale=5.0,
-        threshold=0.60,
-    ),
-)
-```
+**Note**: Previous results showing 3-model MAE 3.27 were obtained with `FeatureConfig()` (all pendulums, no subsampling). These are not reproducible with PRODUCTION_CONFIG.
 
 ### Recommended Configurations
 
 | Use Case | Config | MAE | Coverage |
 |----------|--------|-----|----------|
-| **Maximum accuracy** | **3-model + std/s=5/t=0.60** | **~3.3** | **~12%** |
-| Best 2-model | 2-model + sqrt/s=5/t=0.60 | ~3.4 | ~14% |
-| Simplest | QualityGatedCombiner(0.7) | ~4.4 | ~12% |
-| **Balanced (default)** | 2-model + sqrt/s=15/t=0.60 | ~4.9 | ~30% |
+| **Maximum accuracy** | **2-model + sqrt/s=5/t=0.60** | **3.38** | **~14%** |
+| Simplest & competitive | QualityGatedCombiner(0.7) | 3.35 | ~12% |
+| **Balanced (default)** | 2-model + sqrt/s=15/t=0.60 | 4.86 | ~30% |
 | High coverage | 2-model + sqrt/s=40/t=0.60 | ~7.9 | ~50% |
 
 See experiment scripts in `scripts/` for detailed results:
