@@ -65,9 +65,6 @@ __all__ = [
     # Combiner experiment
     'CachedSample',
     'CombinerExperiment',
-    # Backward compatibility
-    'CachedRawPrediction',
-    'FormulaExperiment',
 ]
 
 if TYPE_CHECKING:
@@ -392,12 +389,8 @@ class CachedSample:
 
     @property
     def model_predictions_dict(self) -> dict[str, int]:
-        """Return model predictions as dict for backward compatibility."""
+        """Return model predictions as dict for CombinerExperiment."""
         return {p.model: p.frame for p in self.predictions}
-
-
-# Backward compatibility alias
-CachedRawPrediction = CachedSample
 
 
 class CombinerExperiment:
@@ -574,10 +567,6 @@ class CombinerExperiment:
                       f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
 
         return results
-
-
-# Backward compatibility alias
-FormulaExperiment = CombinerExperiment
 
 
 # =============================================================================
@@ -1108,22 +1097,6 @@ class CachedEvaluator:
             cached_samples=all_cached_samples,
             seeds=seeds,
             k=k,
-        )
-
-    # Backward compatibility alias
-    def create_formula_experiment(
-        self,
-        predictor_fn: Callable[[], CachedSelectivePredictor],
-        k: int = 5,
-        seeds: list[int] | None = None,
-        verbose: bool = True,
-    ) -> CombinerExperiment:
-        """Deprecated: Use create_combiner_experiment instead."""
-        return self.create_combiner_experiment(
-            pipeline_factory=predictor_fn,
-            k=k,
-            seeds=seeds,
-            verbose=verbose,
         )
 
 

@@ -496,27 +496,11 @@ class BoomDetectionPipeline:
                 feature_config_dict = json.load(f)
                 feature_config = FeatureConfig(**feature_config_dict)
 
-        # Get frame models from config (with fallback for old saves)
-        frame_models = tuple(config.get('frame_models', ['cnn', 'hgb']))
+        # Get frame models from config
+        frame_models = tuple(config['frame_models'])
 
-        # Handle both old and new config formats
-        if 'combiner' in config:
-            # New format: combiner config
-            combiner = combiner_from_config(config['combiner'])
-        else:
-            # Old format: acceptance_formula + acceptance_params + primary_model
-            # Convert to ThresholdCombiner for backward compatibility
-            primary_model = config.get('primary_model', 'cnn')
-            acceptance_formula = config.get('acceptance_formula', 'sqrt')
-            acceptance_params = config.get('acceptance_params', {})
-            combiner = ThresholdCombiner(
-                primary_model=primary_model,
-                agreement_transform=acceptance_formula,
-                disagreement_scale=acceptance_params.get('scale', 15.0),
-                threshold=acceptance_params.get('threshold', 0.60),
-                agreement_weight=acceptance_params.get('agreement_weight', 0.4),
-                quality_weight=acceptance_params.get('quality_weight', 0.6),
-            )
+        # Load combiner config
+        combiner = combiner_from_config(config['combiner'])
 
         # Create pipeline with saved config
         pipeline = cls(

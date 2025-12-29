@@ -99,8 +99,11 @@ def run_comprehensive_sweep(experiment, output_dir: Path | None = None) -> dict:
     results = experiment.sweep(combiners, verbose=True)
 
     # Organize results for analysis
+    # Note: results keys are string representations, so iterate combiners directly
     organized = []
-    for combiner, result in results.items():
+    for combiner in combiners:
+        key = str(combiner)
+        result = results[key]
         mae = result.mean_metrics.get('selective_mae', float('nan'))
         mae_std = result.std_metrics.get('selective_mae', 0)
         cov = result.mean_metrics.get('coverage', 0)
