@@ -416,6 +416,45 @@ class QualityGatedModelCombiner:
 
 
 @dataclass
+class SpecializedModelCombiner:
+    """
+    Accept if predicted quality >= threshold, use a specialized model for prediction.
+
+    The specialized_model attribute tells the pipeline which trained specialized
+    model to use for final prediction (e.g., 'hgb_0.4', 'cnn_0.5').
+
+    This combiner is designed to work with pipelines that train multiple
+    specialized models at different quality thresholds.
+    """
+    threshold: float = 0.7
+    specialized_model: str = 'specialized'  # Key of specialized model to use
+
+    def __call__(
+        self,
+        predictions: list[ModelPrediction],
+        predicted_quality: float,
+        features: np.ndarray | None = None,
+    ) -> int | None:
+        if predicted_quality >= self.threshold:
+            # Return median as placeholder - pipeline will override with specialized model
+            return median_frame(predictions)
+        return None
+
+    def to_config(self) -> dict:
+        return {
+            'type': 'SpecializedModelCombiner',
+            'params': {
+                'threshold': self.threshold,
+                'specialized_model': self.specialized_model,
+            }
+        }
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'SpecializedModelCombiner':
+        return cls(**config['params'])
+
+
+@dataclass
 class AgreementGatedCombiner:
     """
     Accept if disagreement <= threshold, use median.
@@ -513,6 +552,7 @@ COMBINER_REGISTRY: dict[str, type] = {
     'NamedModelCombiner': NamedModelCombiner,
     'QualityGatedCombiner': QualityGatedCombiner,
     'QualityGatedModelCombiner': QualityGatedModelCombiner,
+    'SpecializedModelCombiner': SpecializedModelCombiner,
     'AgreementGatedCombiner': AgreementGatedCombiner,
     'MajorityVoteCombiner': MajorityVoteCombiner,
 }

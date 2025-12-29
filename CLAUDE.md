@@ -434,27 +434,60 @@ pipeline = BoomDetectionPipeline(
 
 ### Specialized Model Experiment (Negative Result)
 
-**Hypothesis**: Models trained only on high-quality data (quality >= 0.70) would make more accurate predictions by avoiding learning from ambiguous booms.
+**Hypothesis**: Models trained only on high-quality data (quality >= threshold) would make more accurate predictions by avoiding learning from ambiguous booms.
 
-**Result**: The hypothesis is **NOT supported**. Specialized models perform WORSE than baselines.
+**Result**: The hypothesis is **NOT supported**. Specialized models perform WORSE or equal to baselines.
+
+#### Multi-Threshold HGB Experiment (Dec 2025)
+
+Tested training HGB at different quality thresholds (0.4, 0.5, 0.6, 0.7) to see if more training data helps:
+
+**At 12.2% coverage (accept=0.7) - Most Selective:**
+| Training Threshold | Training Samples | MAE | Notes |
+|--------------------|-----------------|-----|-------|
+| hgb_0.5 | ~40/fold | **3.18 ± 1.15** | Best, lowest variance |
+| hgb_0.6 | ~35/fold | 3.18 ± 1.61 | Tied, higher variance |
+| hgb_0.4 | ~45/fold | 3.29 ± 1.59 | Slightly worse |
+| **baseline** | all | **3.35 ± 1.39** | Simpler, competitive |
+| hgb_0.7 | ~22/fold | 3.73 ± 1.66 | **WORST** - too few samples |
+
+**At 45.2% coverage (accept=0.6) - Baseline is Best:**
+| Training Threshold | MAE | Notes |
+|--------------------|-----|-------|
+| **baseline** | **5.86 ± 0.65** | **BEST** |
+| hgb_0.6 | 5.96 ± 0.19 | |
+| hgb_0.5 | 6.21 ± 0.21 | |
+| hgb_0.4 | 6.28 ± 0.17 | |
+| hgb_0.7 | 6.45 ± 0.91 | **WORST** |
+
+**Key Insights from Multi-Threshold Experiment:**
+1. **Training threshold 0.7 is consistently worst** - Too few samples (~20-26/fold)
+2. **Training at 0.5 or 0.6 gives marginal improvement (~5%) at high selectivity** - MAE 3.18 vs 3.35 baseline
+3. **At higher coverage, baseline is better** - Specialized models don't generalize to lower-quality samples
+4. **The improvement is marginal** - Only ~0.17 frames at 12.2% coverage
+5. **hgb_0.5 has lower variance** than hgb_0.6 (±1.15 vs ±1.61) - more stable
+
+#### Original Single-Threshold Experiment
+
+Previous experiment with threshold 0.7 only:
 
 | Configuration | MAE | Coverage | Notes |
 |---------------|-----|----------|-------|
-| **baseline QualityGated(0.7)** | **3.35 ± 1.39** | 12.2% | **BEST** |
+| **baseline QualityGated(0.7)** | **3.35 ± 1.39** | 12.2% | **RECOMMENDED** |
 | baseline ThresholdCombiner(scale=5) | 3.38 ± 0.83 | 13.7% | Close second |
-| specialized_hgb + QualityGated(0.7) | 3.73 ± 1.66 | 12.2% | WORSE |
+| specialized_hgb_0.7 + QualityGated(0.7) | 3.73 ± 1.66 | 12.2% | WORSE |
 | specialized_lstm + QualityGated(0.7) | 3.84 ± 1.36 | 12.2% | WORSE |
 | specialized_cnn + QualityGated(0.7) | 6.54 ± 5.06 | 12.2% | Very poor |
 
 **Why specialized models don't help**:
 - Training on ALL data (including ambiguous cases) provides beneficial regularization
-- High-quality samples (~20-26 per fold) are too few for effective specialized training
-- Specialized CNN is particularly unstable with limited training data
+- Even with more training data (threshold 0.5: ~40/fold vs 0.7: ~22/fold), improvement is marginal
+- At higher coverage levels, specialized models actually hurt performance
 - The existing quality gating already ensures we only make predictions on high-quality simulations
 
-**Conclusion**: Don't use specialized models. Stick with the baseline approach of training on all data and using quality prediction for acceptance decisions.
+**Conclusion**: Don't use specialized models. The baseline approach of training on all data with quality prediction for acceptance is simpler and nearly as accurate. The marginal gain (~5% at 12.2% coverage) doesn't justify the complexity.
 
-See `scripts/experiment_specialized_model.py` for detailed results.
+See `scripts/experiment_specialized_model.py` and `scripts/experiment_multi_threshold.py` for detailed results.
 
 ---
 
