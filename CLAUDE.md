@@ -307,7 +307,65 @@ result = evaluate(dataset, cache)
 6. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
 7. **Caustic features do NOT improve the pipeline** - all tested formulas performed worse than no_caustic baseline
 
+## Acceptance Formula Characterization
+
+Comprehensive sweep of 480 configurations (4 formulas × 20 scales × 6 thresholds).
+Results in `runs/characterization_full/`.
+
+### MAE vs Coverage Tradeoff
+
+The relationship is **monotonic but non-linear** with diminishing returns at extreme selectivity:
+
+| Coverage | Best MAE | Configuration | Notes |
+|----------|----------|---------------|-------|
+| 5-10% | 2.6 ± 0.7 | sigmoid/s=4/t=0.70 | Statistically fragile (~5-9 samples) |
+| 10-15% | 2.8 ± 0.9 | sqrt/s=18/t=0.70 | Good accuracy, reasonable reliability |
+| 15-20% | 3.0 ± 0.8 | sigmoid/s=8/t=0.70 | |
+| 25-30% | 4.6 ± 1.4 | linear/s=15/t=0.70 | |
+| 35-40% | 4.9 ± 1.3 | sqrt/s=18/t=0.60 | |
+| 50-60% | 6.7 ± 1.6 | quadratic/s=40/t=0.70 | |
+
+### Parameter Effects
+
+**Scale** (disagreement tolerance):
+- Lower scale = more selective (requires tighter agreement)
+- sqrt/s=5 vs s=15: MAE 3.4→4.9 but coverage 14%→30%
+
+**Threshold** (accept score cutoff):
+- Higher threshold = more selective
+- t=0.70 gives best MAE but lowest coverage
+- t=0.60 is a good balance for production
+
+**Formula comparison** (all similar when tuned):
+- **sqrt**: Most stable across coverage range (recommended)
+- **sigmoid**: Best at extreme selectivity
+- **linear**: Simple, slightly worse at low coverage
+- **quadratic**: Similar to sqrt
+
+### Why 3-Model Doesn't Help
+
+| Metric | 2-model | 3-model | Impact |
+|--------|---------|---------|--------|
+| Mean disagreement | 11.3 | 17.1 | +52% inflation |
+| LSTM causes extra disagreement | - | 66% of cases | More rejections |
+| When LSTM disagrees, it's correct | - | 45% | No better than chance |
+| Correlation with error | r=0.44 | r=0.56 | Better signal, but... |
+
+**Root cause**: Range-based disagreement (max-min) inflates with more models. LSTM acts as outlier without improving discrimination.
+
+**Paradox**: 3-model disagreement correlates BETTER with error, suggesting the signal IS useful but needs different aggregation (std instead of range?). With 90 simulations, simpler 2-model is more robust.
+
+### Recommended Configurations
+
+| Use Case | Config | MAE | Coverage |
+|----------|--------|-----|----------|
+| Maximum accuracy | sqrt/s=15/t=0.70 | ~2.8 | ~12% |
+| Conservative selective | sqrt/s=5/t=0.60 | ~3.4 | ~14% |
+| **Balanced (default)** | sqrt/s=15/t=0.60 | ~4.9 | ~30% |
+| High coverage | sqrt/s=40/t=0.60 | ~7.9 | ~50% |
+
 See experiment scripts in `scripts/` for detailed results:
+- `scripts/characterize_acceptance.py` - Comprehensive formula sweeps
 - `scripts/evaluate_3model_pipeline.py` - 2-model vs 3-model comparison
 - `scripts/evaluate_lstm.py` - Individual model (CNN/HGB/LSTM) evaluation
 - `scripts/comprehensive_evaluation.py` - Full evaluation with caustic formula comparison
