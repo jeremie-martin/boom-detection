@@ -33,6 +33,52 @@ This means:
 
 The boom is the moment of chaotic divergence: when nearly-identical pendulums suddenly spread apart due to sensitivity to initial conditions (the butterfly effect). The boom is the visually dramatic moment when chaos erupts. But the boom moment is NOT when pendulums slowly start diverging, the boom moment marks the explosion of chaotic divergence. There's a clear before/after. A boom with a high "boom quality score" is typically a boom that any human would trivially and objectively be able to find. Simulation with a low quality boom score (as annotated in the dataset) typically have a not-so-well-defined boom moment (it can be very ambiguous, there's not one clear "boom" moment, sometimes it can drags on, sometimes we can hesitate with different boom moments etc.). High quality boom typtically involves the pendulums slowly separating into 2+ distinct clusters (before boom) before accelerating and then meeting at high speed (boom moment), with caustic patterns emerging often at least a bit before the boom moment (and definitely right after it, since caustic-like patterns emerge from the chaotic divergence of such a simulation, and the boom moment marks the visually dramatic moment when true chaotic divergence begins).
 
+## Standard Workflows
+
+### 1. Evaluate a Configuration (Quick Check)
+```bash
+# Quick single-seed (for development only - don't report these!)
+uv run python -m boom_detection.deploy_pipeline data --evaluate --quick \
+    --acceptance-formula sqrt --scale 5
+
+# Robust multi-seed (for reportable results)
+uv run python -m boom_detection.deploy_pipeline data --evaluate \
+    --acceptance-formula sqrt --scale 15 --threshold 0.60
+```
+
+### 2. Experiment with Acceptance Formulas (Gold Standard)
+```bash
+# Validate documented results and explore parameter space
+uv run python scripts/characterize_acceptance.py data --validate --sweep
+
+# Just validate documented configurations
+uv run python scripts/characterize_acceptance.py data --validate
+
+# Comprehensive sweep with output
+uv run python scripts/characterize_acceptance.py data --sweep --output runs/characterization
+```
+
+The `characterize_acceptance.py` script uses `FormulaExperiment.sweep()` to explore the parameter space **without retraining models**. This is the correct way to test new formulas or scales.
+
+### 3. Train and Deploy a Model
+```bash
+# Step 1: Train and save (uses all data)
+uv run python -m boom_detection.deploy_pipeline data --train --output models/v1 \
+    --acceptance-formula sqrt --scale 15
+
+# Step 2a: Low-latency server (for C++/real-time integration)
+uv run python scripts/boom_server.py models/v1 --socket /tmp/boom.sock
+
+# Step 2b: Batch inference
+uv run python -m boom_detection.deploy_pipeline data --predict models/v1
+```
+
+### 4. Test New Features/Models
+```bash
+# Use CachedEvaluator in Python for new experiments
+# See scripts/evaluate_3model_pipeline.py as template
+```
+
 ## Key Patterns
 
 ### The Deployable Pipeline
@@ -133,17 +179,39 @@ artifact.save(Path("runs/my_experiment"))
 
 ## File Guide
 
+### Core Modules (`src/boom_detection/`)
+
 | File | Purpose |
 |------|---------|
-| `deploy_pipeline.py` | **Start here** - production pipeline |
-| `evaluation.py` | **Unified evaluation framework** - CachedEvaluator, SelectivePrediction, RunArtifact |
+| `deploy_pipeline.py` | **Production pipeline** - CLI for evaluate/train/predict |
+| `acceptance.py` | **Acceptance functions** - sqrt, linear, sigmoid, quadratic formulas |
+| `evaluation.py` | **Evaluation framework** - CachedEvaluator, FormulaExperiment, SelectivePrediction |
 | `features.py` | Feature extraction + caching |
 | `frame_models.py` | HistGBM classifier |
-| `sequence_models.py` | CNN, LSTM, Transformer |
+| `sequence_models.py` | CNN, LSTM, Transformer (PyTorch) |
 | `quality_models.py` | Quality prediction |
-| `run_baselines.py` | Baseline comparison (uses CachedEvaluator) |
-| `pipeline.py` | Multi-stage pipeline components |
-| `ensemble.py` | Adaptive ensemble |
+
+### Scripts (`scripts/`)
+
+| Script | When to Use |
+|--------|-------------|
+| `characterize_acceptance.py` | **Experiment with acceptance formulas** - validates results, sweeps parameters |
+| `boom_server.py` | **Deploy for real-time inference** - Unix socket server for C++ integration |
+| `validate_formula_experiment.py` | Verify FormulaExperiment produces identical results to cross_validate |
+| `evaluate_3model_pipeline.py` | Compare 2-model vs 3-model configurations |
+| `evaluate_lstm.py` | Evaluate individual models (CNN/HGB/LSTM) |
+| `comprehensive_evaluation.py` | Full evaluation with caustic formula comparison |
+
+### Which Tool for Which Task?
+
+| Task | Tool |
+|------|------|
+| Evaluate a specific configuration | `deploy_pipeline.py --evaluate` |
+| Experiment with acceptance formulas | `characterize_acceptance.py` |
+| Train and save a model | `deploy_pipeline.py --train` |
+| Run inference in production | `boom_server.py` or `deploy_pipeline.py --predict` |
+| Test a new frame model | Create script using `CachedEvaluator` |
+| Test a new feature | Modify `features.py`, then evaluate |
 
 ## Memory Management
 

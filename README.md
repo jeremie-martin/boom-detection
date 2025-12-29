@@ -40,12 +40,31 @@ Predict the "boom" frame in chaotic double pendulum simulations - the moment whe
 # Install
 uv sync --extra ml
 
-# Evaluate the deployable pipeline
+# Evaluate with default settings (sqrt/15)
 uv run python -m boom_detection.deploy_pipeline data --evaluate
 
+# Evaluate with different selectivity
+uv run python -m boom_detection.deploy_pipeline data --evaluate \
+    --acceptance-formula sqrt --scale 5  # Most selective: MAE 3.4 at 14%
+
 # Train and save models
-uv run python -m boom_detection.deploy_pipeline data --train --output models/
+uv run python -m boom_detection.deploy_pipeline data --train --output models/v1
+
+# Run inference server (for C++ integration)
+uv run python scripts/boom_server.py models/v1
 ```
+
+## Workflows
+
+| Task | Command |
+|------|---------|
+| **Evaluate a configuration** | `deploy_pipeline data --evaluate --acceptance-formula sqrt --scale 15` |
+| **Experiment with formulas** | `scripts/characterize_acceptance.py data --validate --sweep` |
+| **Train for production** | `deploy_pipeline data --train --output models/v1` |
+| **Run inference server** | `scripts/boom_server.py models/v1` |
+| **Batch inference** | `deploy_pipeline data --predict models/v1` |
+
+See [CLAUDE.md](CLAUDE.md) for detailed workflows and API documentation.
 
 ## How It Works
 
@@ -95,10 +114,17 @@ cp -r /path/to/double-pendulum/output/eval2 data
 ## Development
 
 ```bash
-uv sync --extra ml                                    # Install
-uv run pytest                                         # Run tests
-uv run python -m boom_detection.run_baselines data    # Run baselines
-uv run python -m boom_detection.deploy_pipeline data --evaluate  # Best pipeline
+uv sync --extra ml                    # Install
+uv run pytest                         # Run tests (118 tests)
+
+# Validate all documented results reproduce correctly
+uv run python scripts/characterize_acceptance.py data --validate
+
+# Run comprehensive parameter sweep
+uv run python scripts/characterize_acceptance.py data --sweep --output runs/sweep
+
+# Compare 2-model vs 3-model configurations
+uv run python scripts/evaluate_3model_pipeline.py
 ```
 
 ## Key Insights
