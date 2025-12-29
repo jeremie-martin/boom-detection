@@ -4,20 +4,24 @@ Predict the "boom" frame in chaotic double pendulum simulations - the moment whe
 
 ## Pipeline
 
+**Training** (once): Simulations + annotations → feature extraction → train CNN, HGB, and quality models → save to `models/`
+
+**Inference**:
 ```
                             ┌───────────┐
-  Simulation                │    CNN    │──► pred: 546
-  (2000 pendulums)          │ (PyTorch) │              ╲
-        │                   └───────────┘               ╲    ┌─────────────────┐
-        │     ┌──────────┐                               ══► │ Accept/Reject   │
-        └────►│ Features │                               ══► │                 │
-              │(183/frame)│                              ╱   │ score ≥ 0.60 ?  │
-              └──────────┘  ┌───────────┐               ╱    └────────┬────────┘
-                            │    HGB    │──► pred: 546                │
-                            │ (sklearn) │                    ┌────────┴────────┐
-                            └───────────┘                    ▼                 ▼
-                                                          ACCEPT            REJECT
-                                                       boom_frame=546    boom_frame=null
+  Simulation                │    CNN    │──► boom_frame = X
+  (2000 pendulums)          │ (PyTorch) │                  ╲
+        │                   └───────────┘                   ╲    ┌─────────────────┐
+        │     ┌──────────┐                                   ══► │ Accept/Reject   │
+        └────►│ Features │                                   ══► │                 │
+              │(183/frame)│                                  ╱   │ score ≥ 0.60 ?  │
+              └──────────┘  ┌───────────┐                   ╱    └────────┬────────┘
+                            │    HGB    │──► boom_frame = Y              │
+                            │ (sklearn) │                       ┌────────┴────────┐
+                            └───────────┘                       ▼                 ▼
+                                                             ACCEPT            REJECT
+                                                          boom_frame = X        null
+                                                          (use CNN: more accurate)
 ```
 
 **Accept score** = `0.4 × model_agreement + 0.6 × predicted_quality`
