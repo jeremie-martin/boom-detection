@@ -13,13 +13,13 @@ This means:
 
 **Current best (90 simulations, 3-seed evaluation, PRODUCTION_CONFIG)**:
 
-*2-model pipeline (CNN + HGB) - RECOMMENDED:*
-- Most selective (sqrt/5): MAE 3.38 ± 0.83 frames at 13.7% coverage
-- Balanced (sqrt/10): MAE 4.90 ± 1.16 frames at 22.2% coverage
-- Permissive (sqrt/15): MAE 4.86 ± 1.28 frames at 30.4% coverage
+*Quality-gated with HGB - NEW BEST:*
+- **Most selective (thresh=0.70)**: MAE 3.06 ± 1.96 at 12.2% coverage
+- Very selective (thresh=0.72): MAE 2.33 ± 2.16 at 7.0% coverage
 
-*Quality-only baseline - simplest and competitive:*
-- QualityGatedCombiner(0.7): MAE 3.35 ± 1.39 at 12.2% coverage
+*2-model pipeline (CNN + HGB) with ThresholdCombiner:*
+- Most selective (scale=5): MAE 3.38 ± 0.83 frames at 13.7% coverage
+- Balanced (scale=15): MAE 4.86 ± 1.28 frames at 30.4% coverage
 
 *3-model pipeline (CNN + HGB + LSTM) - NOT recommended:*
 - With std/5: MAE 5.57 ± 1.93 at 11.9% (worse than 2-model)
@@ -308,14 +308,14 @@ result = evaluate(dataset, cache)
 
 ## Key Findings
 
-1. **2-model pipeline is optimal** - 3-model does NOT improve over 2-model with PRODUCTION_CONFIG
-2. **Quality-only gating is highly competitive** - QualityGatedCombiner(0.7) achieves MAE 3.35 at 12.2%
-3. **Use CNN for final prediction** - CNN is more accurate than HGB or median
-4. **scale=5 achieves MAE 3.38 at 13.7% coverage** - best accuracy when being selective (2-model)
+1. **QualityGatedModelCombiner with HGB is NEW BEST** - MAE 3.06 at 12.2% beats ThresholdCombiner
+2. **HGB beats CNN and median for primary model** - Use `primary_model='hgb'` for best accuracy
+3. **2-model pipeline is optimal** - 3-model does NOT improve over 2-model with PRODUCTION_CONFIG
+4. **scale=5 with ThresholdCombiner achieves MAE 3.38 at 13.7%** - Good alternative to quality-only
 5. **LSTM is the best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
-6. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
+6. **Accept threshold 0.60-0.70 works best** - ECE improved from 0.15 to 0.06
 7. **Caustic features do NOT improve the pipeline** - all tested formulas performed worse than no_caustic baseline
-8. **Agreement helps at moderate coverage** - 0.4/0.6 weights beat quality-only at 30% coverage
+8. **Agreement helps at moderate coverage** - ThresholdCombiner beats quality-only at 30% coverage
 9. **PRODUCTION_CONFIG is required** - Use `max_pendulums=2000, include_caustic=False` for consistent results
 
 ## Acceptance Formula Characterization
@@ -375,14 +375,29 @@ The relationship is **monotonic but non-linear** with diminishing returns at ext
 
 | Use Case | Config | MAE | Coverage |
 |----------|--------|-----|----------|
-| **Maximum accuracy** | **2-model + sqrt/s=5/t=0.60** | **3.38** | **~14%** |
-| Simplest & competitive | QualityGatedCombiner(0.7) | 3.35 | ~12% |
-| **Balanced (default)** | 2-model + sqrt/s=15/t=0.60 | 4.86 | ~30% |
-| High coverage | 2-model + sqrt/s=40/t=0.60 | ~7.9 | ~50% |
+| **Maximum accuracy** | **QualityGatedModelCombiner(thresh=0.70, primary='hgb')** | **3.06** | **~12%** |
+| Very selective | QualityGatedModelCombiner(thresh=0.72, primary='hgb') | 2.33 | ~7% |
+| ThresholdCombiner best | ThresholdCombiner(scale=5) | 3.38 | ~14% |
+| **Balanced (default)** | ThresholdCombiner(scale=15) | 4.86 | ~30% |
+| High coverage | ThresholdCombiner(scale=40) | ~7.9 | ~50% |
+
+**To use the new best config:**
+```python
+from boom_detection.combine import QualityGatedModelCombiner
+
+pipeline = BoomDetectionPipeline(
+    frame_models=('cnn', 'hgb'),  # Still need both for training quality model
+    combiner=QualityGatedModelCombiner(
+        threshold=0.70,
+        primary_model='hgb',  # Use HGB prediction when accepted
+    ),
+)
+```
 
 See experiment scripts in `scripts/` for detailed results:
 - `scripts/characterize_acceptance.py` - Comprehensive formula sweeps
-- `scripts/experiment_combiner_ablations.py` - **Combiner ablations** (std vs range, baselines, weights)
-- `scripts/evaluate_3model_pipeline.py` - 2-model vs 3-model comparison
+- `scripts/experiment_combiner_ablations.py` - Combiner ablations (std vs range, baselines, weights)
+- `scripts/experiment_quality_gated_model.py` - **QualityGatedModelCombiner experiments** (NEW BEST)
+- `scripts/experiment_combined_best.py` - Combined best configuration testing
+- `scripts/experiment_3model_optimization.py` - 3-model parameter sweeps
 - `scripts/evaluate_lstm.py` - Individual model (CNN/HGB/LSTM) evaluation
-- `scripts/comprehensive_evaluation.py` - Full evaluation with caustic formula comparison
