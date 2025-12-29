@@ -2,7 +2,7 @@
 """
 Comprehensive acceptance formula characterization.
 
-Uses FormulaExperiment.sweep() to efficiently explore the acceptance parameter space
+Uses CombinerExperiment.sweep() to efficiently explore the acceptance parameter space
 and validate documented results.
 
 Usage:
@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import time
@@ -27,6 +28,7 @@ import numpy as np
 
 
 # Documented results from README.md (to validate against)
+# Keys are (agreement_transform, disagreement_scale, threshold)
 DOCUMENTED_RESULTS = {
     ('sqrt', 5.0, 0.60): {'mae': 3.4, 'mae_std': 0.8, 'coverage': 0.14},
     ('sqrt', 15.0, 0.60): {'mae': 4.9, 'mae_std': 1.3, 'coverage': 0.30},
@@ -36,17 +38,21 @@ DOCUMENTED_RESULTS = {
 
 def validate_documented_results(experiment) -> bool:
     """Validate that we can reproduce documented results."""
+    from boom_detection.combine import ThresholdCombiner
+
     print("\n" + "=" * 70)
     print("VALIDATING DOCUMENTED RESULTS")
     print("=" * 70)
 
     all_passed = True
 
-    for (formula, scale, threshold), expected in DOCUMENTED_RESULTS.items():
-        result = experiment.evaluate(
-            acceptance_formula=formula,
-            acceptance_params={'scale': scale, 'threshold': threshold},
+    for (transform, scale, threshold), expected in DOCUMENTED_RESULTS.items():
+        combiner = ThresholdCombiner(
+            agreement_transform=transform,
+            disagreement_scale=scale,
+            threshold=threshold,
         )
+        result = experiment.evaluate(combiner)
 
         actual_mae = result.mean_metrics.get('selective_mae', float('nan'))
         actual_mae_std = result.std_metrics.get('selective_mae', 0)
@@ -60,7 +66,7 @@ def validate_documented_results(experiment) -> bool:
         if not (mae_close and cov_close):
             all_passed = False
 
-        print(f"\n{formula}/scale={scale:.0f}/threshold={threshold:.2f}:")
+        print(f"\n{transform}/scale={scale:.0f}/threshold={threshold:.2f}:")
         print(f"  Expected: MAE {expected['mae']:.1f} ± {expected['mae_std']:.1f} at {expected['coverage']:.0%}")
         print(f"  Actual:   MAE {actual_mae:.2f} ± {actual_mae_std:.2f} at {actual_cov:.1%}")
         print(f"  Status:   [{status}]")
@@ -77,35 +83,33 @@ def validate_documented_results(experiment) -> bool:
 
 def run_comprehensive_sweep(experiment, output_dir: Path | None = None) -> dict:
     """Run comprehensive parameter sweep across all formulas."""
+    from boom_detection.combine import ThresholdCombiner
+
     print("\n" + "=" * 70)
     print("RUNNING COMPREHENSIVE SWEEP")
     print("=" * 70)
 
-    # Define sweep parameters
-    formulas = ['sqrt', 'linear', 'sigmoid', 'quadratic']
-    param_grid = {
-        'scale': [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0, 25.0, 30.0],
-        'threshold': [0.50, 0.55, 0.60, 0.65, 0.70],
-    }
-
-    results = experiment.sweep(
-        formulas=formulas,
-        param_grid=param_grid,
-        verbose=True,
+    # Generate all combiner configurations using grid helper
+    combiners = ThresholdCombiner.grid(
+        agreement_transform=['sqrt', 'linear', 'sigmoid', 'quadratic'],
+        disagreement_scale=[3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0, 25.0, 30.0],
+        threshold=[0.50, 0.55, 0.60, 0.65, 0.70],
     )
+
+    results = experiment.sweep(combiners, verbose=True)
 
     # Organize results for analysis
     organized = []
-    for (formula, scale, threshold), result in results.items():
+    for combiner, result in results.items():
         mae = result.mean_metrics.get('selective_mae', float('nan'))
         mae_std = result.std_metrics.get('selective_mae', 0)
         cov = result.mean_metrics.get('coverage', 0)
         cov_std = result.std_metrics.get('coverage', 0)
 
         organized.append({
-            'formula': formula,
-            'scale': scale,
-            'threshold': threshold,
+            'formula': combiner.agreement_transform,
+            'scale': combiner.disagreement_scale,
+            'threshold': combiner.threshold,
             'mae': mae,
             'mae_std': mae_std,
             'coverage': cov,
@@ -148,7 +152,6 @@ def run_comprehensive_sweep(experiment, output_dir: Path | None = None) -> dict:
             json.dump(organized, f, indent=2)
 
         # Save as CSV for easy analysis
-        import csv
         with open(output_dir / 'sweep_results.csv', 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=organized[0].keys())
             writer.writeheader()
@@ -173,9 +176,10 @@ def main():
         parser.error("Must specify at least one of --validate or --sweep")
 
     # Import heavy modules
+    from boom_detection.combine import ThresholdCombiner
     from boom_detection.deploy_pipeline import BoomDetectionPipeline
-    from boom_detection.features import FeatureCache, FeatureConfig
     from boom_detection.evaluation import CachedEvaluator
+    from boom_detection.features import FeatureCache, FeatureConfig
     from boom_detection.loader import load_dataset
     from boom_detection.logging_config import log_memory_usage
 
@@ -207,22 +211,25 @@ def main():
     gc.collect()
     log_memory_usage("after feature extraction")
 
-    # Create evaluator and formula experiment
+    # Create evaluator and combiner experiment
     evaluator = CachedEvaluator(dataset, cache)
     print(f"\nEvaluating on {len(evaluator.sim_ids)} simulations with seeds {args.seeds}")
 
-    print("\nCreating FormulaExperiment (training models once)...")
+    print("\nCreating CombinerExperiment (training models once)...")
     start_time = time.time()
-    experiment = evaluator.create_formula_experiment(
-        predictor_fn=lambda: BoomDetectionPipeline(
-            acceptance_formula='sqrt',
-            acceptance_params={'scale': 15.0, 'threshold': 0.60},
+    experiment = evaluator.create_combiner_experiment(
+        pipeline_factory=lambda: BoomDetectionPipeline(
+            combiner=ThresholdCombiner(
+                agreement_transform='sqrt',
+                disagreement_scale=15.0,
+                threshold=0.60,
+            ),
         ),
         k=5,
         seeds=args.seeds,
         verbose=True,
     )
-    print(f"FormulaExperiment created in {time.time() - start_time:.1f}s")
+    print(f"CombinerExperiment created in {time.time() - start_time:.1f}s")
 
     # Run validation
     if args.validate:

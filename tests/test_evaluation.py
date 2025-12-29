@@ -432,126 +432,127 @@ class TestRunArtifact:
         assert "Environment:" in summary
 
 
-class TestFormulaExperiment:
+class TestCombinerExperiment:
     """
-    Tests for FormulaExperiment class.
+    Tests for CombinerExperiment class (formerly FormulaExperiment).
 
-    CRITICAL: These tests prove that FormulaExperiment produces IDENTICAL
+    CRITICAL: These tests prove that CombinerExperiment produces IDENTICAL
     results to running the full pipeline evaluation.
     """
 
-    def test_cached_raw_prediction(self):
-        """Should create CachedRawPrediction correctly."""
-        from boom_detection.evaluation import CachedRawPrediction
+    def test_cached_sample(self):
+        """Should create CachedSample correctly."""
+        from boom_detection.combine import ModelPrediction
+        from boom_detection.evaluation import CachedSample
 
-        pred = CachedRawPrediction(
+        pred = CachedSample(
             sim_id='sim_0',
-            model_predictions={'cnn': 50, 'hgb': 48},
+            predictions=[ModelPrediction('cnn', 50), ModelPrediction('hgb', 48)],
             predicted_quality=0.75,
             true_boom=52,
             true_quality=0.8,
         )
 
         assert pred.sim_id == 'sim_0'
-        assert pred.model_predictions == {'cnn': 50, 'hgb': 48}
+        assert len(pred.predictions) == 2
+        assert pred.predictions[0].frame == 50
+        assert pred.predictions[1].frame == 48
         assert pred.predicted_quality == 0.75
         assert pred.true_boom == 52
         assert pred.true_quality == 0.8
-        assert pred.primary_prediction == 50  # First model
+        # Check dict property
+        assert pred.model_predictions_dict == {'cnn': 50, 'hgb': 48}
 
-    def test_formula_experiment_evaluate(self):
-        """FormulaExperiment.evaluate() should return valid results."""
-        from boom_detection.evaluation import (
-            CachedRawPrediction,
-            FormulaExperiment,
-        )
+    def test_combiner_experiment_evaluate(self):
+        """CombinerExperiment.evaluate() should return valid results."""
+        from boom_detection.combine import ModelPrediction, ThresholdCombiner
+        from boom_detection.evaluation import CachedSample, CombinerExperiment
 
         # Create cached predictions for 2 seeds
         seed1_preds = [
-            CachedRawPrediction(
+            CachedSample(
                 sim_id='sim_0',
-                model_predictions={'cnn': 50, 'hgb': 48},
+                predictions=[ModelPrediction('cnn', 50), ModelPrediction('hgb', 48)],
                 predicted_quality=0.8,
                 true_boom=52,
                 true_quality=0.9,
             ),
-            CachedRawPrediction(
+            CachedSample(
                 sim_id='sim_1',
-                model_predictions={'cnn': 60, 'hgb': 80},  # High disagreement
+                predictions=[ModelPrediction('cnn', 60), ModelPrediction('hgb', 80)],  # High disagreement
                 predicted_quality=0.4,
                 true_boom=65,
                 true_quality=0.5,
             ),
         ]
         seed2_preds = [
-            CachedRawPrediction(
+            CachedSample(
                 sim_id='sim_0',
-                model_predictions={'cnn': 51, 'hgb': 49},
+                predictions=[ModelPrediction('cnn', 51), ModelPrediction('hgb', 49)],
                 predicted_quality=0.75,
                 true_boom=52,
                 true_quality=0.9,
             ),
-            CachedRawPrediction(
+            CachedSample(
                 sim_id='sim_1',
-                model_predictions={'cnn': 62, 'hgb': 78},  # High disagreement
+                predictions=[ModelPrediction('cnn', 62), ModelPrediction('hgb', 78)],  # High disagreement
                 predicted_quality=0.45,
                 true_boom=65,
                 true_quality=0.5,
             ),
         ]
 
-        experiment = FormulaExperiment(
-            cached_predictions=[seed1_preds, seed2_preds],
+        experiment = CombinerExperiment(
+            cached_samples=[seed1_preds, seed2_preds],
             seeds=[42, 43],
             k=5,
-            primary_model='cnn',
         )
 
-        result = experiment.evaluate(
-            acceptance_formula='sqrt',
-            acceptance_params={'scale': 5.0, 'threshold': 0.60},
+        combiner = ThresholdCombiner(
+            agreement_transform='sqrt',
+            disagreement_scale=5.0,
+            threshold=0.60,
         )
+        result = experiment.evaluate(combiner)
 
         assert result.k == 5
         assert result.seeds == [42, 43]
         assert 'selective_mae' in result.mean_metrics
         assert 'coverage' in result.mean_metrics
 
-    def test_formula_application_matches_acceptance_module(self):
+    def test_combiner_application_matches_combine_module(self):
         """
-        CRITICAL TEST: FormulaExperiment must use acceptance.py and produce
-        identical results to deploy_pipeline.py's acceptance logic.
+        CRITICAL TEST: CombinerExperiment must use combine.py and produce
+        identical results to ThresholdCombiner's acceptance logic.
         """
-        from boom_detection.evaluation import (
-            CachedRawPrediction,
-            FormulaExperiment,
-            SelectivePrediction,
-        )
-        from boom_detection.acceptance import get_acceptance_fn
+        from boom_detection.combine import ModelPrediction, ThresholdCombiner
+        from boom_detection.evaluation import CachedSample, CombinerExperiment
 
-        # Test case: exactly match acceptance.py logic
-        pred = CachedRawPrediction(
+        # Test case: exactly match combine.py logic
+        pred = CachedSample(
             sim_id='sim_0',
-            model_predictions={'cnn': 50, 'hgb': 42},  # disagreement = 8
+            predictions=[ModelPrediction('cnn', 50), ModelPrediction('hgb', 42)],  # disagreement = 8
             predicted_quality=0.7,
             true_boom=52,
             true_quality=0.8,
         )
 
-        experiment = FormulaExperiment(
-            cached_predictions=[[pred]],
+        experiment = CombinerExperiment(
+            cached_samples=[[pred]],
             seeds=[42],
             k=5,
-            primary_model='cnn',
+        )
+
+        combiner = ThresholdCombiner(
+            agreement_transform='sqrt',
+            disagreement_scale=15.0,
+            threshold=0.60,
         )
 
         # Evaluate with known parameters
-        result = experiment.evaluate(
-            acceptance_formula='sqrt',
-            acceptance_params={'scale': 15.0, 'threshold': 0.60},
-        )
+        result = experiment.evaluate(combiner)
 
-        # Verify the math manually (must match acceptance.py exactly)
+        # Verify the math manually (must match combine.py exactly)
         # disagreement = |50 - 42| = 8
         # agreement_score = 1 - sqrt(8 / 15) = 1 - sqrt(0.533) = 1 - 0.730 = 0.270
         # accept_score = 0.4 * 0.270 + 0.6 * 0.7 = 0.108 + 0.42 = 0.528
@@ -560,69 +561,66 @@ class TestFormulaExperiment:
         expected_agreement = 1.0 - np.sqrt(8.0 / 15.0)  # ~0.270
         expected_accept_score = 0.4 * expected_agreement + 0.6 * 0.7  # ~0.528
 
-        # Get metrics - we have 1 prediction per seed (2 seeds)
-        # Since all rejected, coverage should be 0
+        # Get metrics - since rejected, coverage should be 0
         assert result.mean_metrics['coverage'] < 1.0  # Not all accepted
 
-        # Also verify using acceptance function directly
-        accept_fn = get_acceptance_fn('sqrt', {'scale': 15.0, 'threshold': 0.60})
-        accepted, accept_score = accept_fn({'cnn': 50, 'hgb': 42}, 0.7)
+        # Also verify using combiner directly
+        preds = [ModelPrediction('cnn', 50), ModelPrediction('hgb', 42)]
+        result_frame = combiner(preds, 0.7)
+        accept_score = combiner.get_score()
         assert abs(accept_score - expected_accept_score) < 1e-10
-        assert accepted == False  # 0.528 < 0.60  # noqa: E712
+        assert result_frame is None  # 0.528 < 0.60, rejected
 
-    def test_formula_experiment_sweep(self):
+    def test_combiner_experiment_sweep(self):
         """sweep() should test multiple configurations."""
-        from boom_detection.evaluation import (
-            CachedRawPrediction,
-            FormulaExperiment,
-        )
+        from boom_detection.combine import ModelPrediction, ThresholdCombiner
+        from boom_detection.evaluation import CachedSample, CombinerExperiment
 
         seed_preds = [
-            CachedRawPrediction(
+            CachedSample(
                 sim_id='sim_0',
-                model_predictions={'cnn': 50, 'hgb': 48},
+                predictions=[ModelPrediction('cnn', 50), ModelPrediction('hgb', 48)],
                 predicted_quality=0.8,
                 true_boom=52,
                 true_quality=0.9,
             ),
         ]
 
-        experiment = FormulaExperiment(
-            cached_predictions=[seed_preds],
+        experiment = CombinerExperiment(
+            cached_samples=[seed_preds],
             seeds=[42],
             k=5,
-            primary_model='cnn',
         )
 
-        results = experiment.sweep(
-            formulas=['sqrt'],
-            param_grid={
-                'scale': [5.0, 10.0, 15.0],
-                'threshold': [0.5, 0.6],
-            },
-            verbose=False,
+        # Generate combiners using grid helper
+        combiners = ThresholdCombiner.grid(
+            agreement_transform=['sqrt'],
+            disagreement_scale=[5.0, 10.0, 15.0],
+            threshold=[0.5, 0.6],
         )
+
+        results = experiment.sweep(combiners, verbose=False)
 
         # Should have 3 scales x 1 formula x 2 thresholds = 6 results
         assert len(results) == 6
-        assert ('sqrt', 5.0, 0.5) in results
-        assert ('sqrt', 15.0, 0.6) in results
 
-    def test_linear_vs_sqrt_formula(self):
-        """Linear and sqrt formulas should produce different results."""
-        from boom_detection.acceptance import get_acceptance_fn
+    def test_linear_vs_sqrt_transform(self):
+        """Linear and sqrt transforms should produce different results."""
+        from boom_detection.combine import ModelPrediction, ThresholdCombiner
 
-        # Test with same parameters, different formulas
-        model_preds = {'cnn': 50, 'hgb': 40}  # disagreement = 10
+        # Test with same parameters, different transforms
+        preds = [ModelPrediction('cnn', 50), ModelPrediction('hgb', 40)]  # disagreement = 10
         quality = 0.7
 
         # Linear: agreement = 1 - 10/15 = 0.333
-        linear_fn = get_acceptance_fn('linear', {'scale': 15.0, 'threshold': 0.60})
-        linear_accepted, linear_score = linear_fn(model_preds, quality)
+        linear = ThresholdCombiner(agreement_transform='linear', disagreement_scale=15.0, threshold=0.60)
+        linear(preds, quality)
+        linear_score = linear.get_score()
 
         # Sqrt: agreement = 1 - sqrt(10/15) = 1 - 0.816 = 0.184
-        sqrt_fn = get_acceptance_fn('sqrt', {'scale': 15.0, 'threshold': 0.60})
-        sqrt_accepted, sqrt_score = sqrt_fn(model_preds, quality)
+        sqrt = ThresholdCombiner(agreement_transform='sqrt', disagreement_scale=15.0, threshold=0.60)
+        sqrt(preds, quality)
+        sqrt_score = sqrt.get_score()
 
         # Linear should give higher accept score (higher agreement)
         linear_agreement = 1.0 - 10.0 / 15.0  # 0.333
@@ -637,16 +635,25 @@ class TestFormulaExperiment:
 
     def test_3model_disagreement_uses_range(self):
         """Disagreement for 3 models should use range (max-min), not std."""
-        from boom_detection.acceptance import get_acceptance_fn
+        from boom_detection.combine import ModelPrediction, ThresholdCombiner
 
         # 3-model prediction: min=45, max=55 -> disagreement = 10
-        model_preds = {'cnn': 50, 'hgb': 45, 'lstm': 55}
+        preds = [
+            ModelPrediction('cnn', 50),
+            ModelPrediction('hgb', 45),
+            ModelPrediction('lstm', 55),
+        ]
         quality = 0.7
 
-        # The acceptance function internally computes disagreement as max-min
+        # The combiner internally computes disagreement as max-min
         # With scale=15, threshold=0.40 (low threshold so it accepts)
-        accept_fn = get_acceptance_fn('sqrt', {'scale': 15.0, 'threshold': 0.40})
-        accepted, accept_score = accept_fn(model_preds, quality)
+        combiner = ThresholdCombiner(
+            agreement_transform='sqrt',
+            disagreement_scale=15.0,
+            threshold=0.40,
+        )
+        result = combiner(preds, quality)
+        accept_score = combiner.get_score()
 
         # Agreement = 1 - sqrt(10/15) = 1 - 0.816 = 0.184
         # Score = 0.4 * 0.184 + 0.6 * 0.7 = 0.0736 + 0.42 = 0.4936

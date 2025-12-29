@@ -62,7 +62,10 @@ __all__ = [
     'CachedEvaluator',
     'robust_evaluate',
     'cross_validate',
-    # Formula experiment
+    # Combiner experiment
+    'CachedSample',
+    'CombinerExperiment',
+    # Backward compatibility
     'CachedRawPrediction',
     'FormulaExperiment',
 ]
@@ -370,127 +373,139 @@ class MultiSeedSelectiveResult:
 
 
 # =============================================================================
-# Formula Experiment Framework
+# Combiner Experiment Framework
 # =============================================================================
 
 @dataclass
-class CachedRawPrediction:
+class CachedSample:
     """
-    Cached raw prediction from a pipeline, before acceptance decision.
+    Cached data for one sample, enabling fast combiner iteration.
 
-    This stores all information needed to recompute acceptance with different
-    formula parameters, without retraining or re-running inference.
+    This stores all information needed to apply different combiners
+    without retraining or re-running inference.
     """
     sim_id: str
-    model_predictions: dict[str, int]  # e.g., {'cnn': 546, 'hgb': 542}
+    predictions: list  # list[ModelPrediction] from frame models
     predicted_quality: float
     true_boom: int
     true_quality: float
 
     @property
-    def primary_prediction(self) -> int:
-        """Return first model's prediction (typically the primary model)."""
-        return next(iter(self.model_predictions.values()))
+    def model_predictions_dict(self) -> dict[str, int]:
+        """Return model predictions as dict for backward compatibility."""
+        return {p.model: p.frame for p in self.predictions}
 
 
-class FormulaExperiment:
+# Backward compatibility alias
+CachedRawPrediction = CachedSample
+
+
+class CombinerExperiment:
     """
-    Experiment framework for iterating on acceptance formulas.
+    Experiment framework for iterating on combiners WITHOUT retraining.
 
-    Trains models once, caches raw predictions, then allows fast iteration
-    on different acceptance formulas WITHOUT retraining.
+    Trains models once, caches predictions, then allows fast iteration
+    on different combiners.
 
-    This is the canonical way to experiment with formula parameters.
+    This is the canonical way to experiment with combiner configurations.
     Results are guaranteed to be IDENTICAL to running the full pipeline.
 
     Usage:
         evaluator = CachedEvaluator(dataset, cache)
 
         # Create experiment (trains models once, caches predictions)
-        experiment = evaluator.create_formula_experiment(
+        experiment = evaluator.create_combiner_experiment(
             pipeline_factory=lambda: BoomDetectionPipeline(),
             seeds=[42, 43, 44],
         )
 
-        # Now iterate on formulas instantly using new acceptance API:
-        for scale in [3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]:
-            result = experiment.evaluate(
-                acceptance_formula='sqrt',
-                acceptance_params={'scale': scale, 'threshold': 0.60},
-            )
+        # Now iterate on combiners instantly:
+        from boom_detection.combine import ThresholdCombiner
+
+        for scale in [5, 10, 15, 20]:
+            combiner = ThresholdCombiner(disagreement_scale=scale, threshold=0.60)
+            result = experiment.evaluate(combiner)
             print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
 
-        # Or use sweep with param_grid:
-        results = experiment.sweep(
-            formulas=['sqrt', 'linear'],
-            param_grid={'scale': range(3, 21), 'threshold': [0.55, 0.60, 0.65]},
+        # Or use sweep with a list of combiners:
+        combiners = ThresholdCombiner.grid(
+            agreement_transform=['sqrt', 'linear'],
+            disagreement_scale=[5, 10, 15],
+            threshold=[0.60],
         )
+        results = experiment.sweep(combiners)
     """
 
     def __init__(
         self,
-        cached_predictions: list[list[CachedRawPrediction]],
+        cached_samples: list[list[CachedSample]],
         seeds: list[int],
         k: int,
-        primary_model: str = 'cnn',
     ):
         """
         Args:
-            cached_predictions: List of lists, one per seed. Each inner list
-                               contains CachedRawPrediction for all test samples
-                               across all folds for that seed.
+            cached_samples: List of lists, one per seed. Each inner list
+                           contains CachedSample for all test samples
+                           across all folds for that seed.
             seeds: The random seeds used for cross-validation.
             k: Number of folds used.
-            primary_model: Which model's prediction to use when accepted.
         """
-        self.cached_predictions = cached_predictions
+        self.cached_samples = cached_samples
         self.seeds = seeds
         self.k = k
-        self.primary_model = primary_model
 
     def evaluate(
         self,
-        acceptance_formula: str = 'sqrt',
-        acceptance_params: dict | None = None,
-        custom_acceptance_fn: 'AcceptanceFunction | None' = None,
+        combiner,
         verbose: bool = False,
     ) -> MultiSeedSelectiveResult:
         """
-        Evaluate a formula configuration on cached predictions.
+        Evaluate a combiner on cached predictions.
 
-        This is FAST - no model training or inference, just formula evaluation.
+        This is FAST - no model training or inference, just combiner evaluation.
 
         Args:
-            acceptance_formula: Name of formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
-            acceptance_params: Parameters for the formula (scale, threshold, weights)
-            custom_acceptance_fn: Pass a custom acceptance function directly
+            combiner: A Combiner instance from boom_detection.combine
             verbose: Print progress
 
         Returns:
             MultiSeedSelectiveResult with metrics for this configuration
         """
-        from .acceptance import get_acceptance_fn, AcceptanceFunction
-
-        # Get acceptance function
-        if custom_acceptance_fn is not None:
-            accept_fn = custom_acceptance_fn
-        else:
-            accept_fn = get_acceptance_fn(acceptance_formula, acceptance_params)
+        from .combine import disagreement as compute_disagreement
 
         all_seed_metrics = []
 
-        for seed_idx, seed_preds in enumerate(self.cached_predictions):
-            # Apply formula to all predictions for this seed
+        for seed_idx, seed_samples in enumerate(self.cached_samples):
+            # Apply combiner to all samples for this seed
             selective_predictions = []
             true_booms = []
             true_qualities = []
 
-            for pred in seed_preds:
-                # Compute acceptance using the acceptance function
-                result = self._apply_acceptance(pred, accept_fn)
-                selective_predictions.append(result)
-                true_booms.append(pred.true_boom)
-                true_qualities.append(pred.true_quality)
+            for sample in seed_samples:
+                # Apply combiner
+                result = combiner(sample.predictions, sample.predicted_quality)
+                accepted = result is not None
+
+                # Get accept_score if available
+                accept_score = 0.0
+                if hasattr(combiner, 'get_score'):
+                    accept_score = combiner.get_score()
+                elif accepted:
+                    accept_score = 1.0
+
+                # Compute disagreement
+                dis = compute_disagreement(sample.predictions, metric='range')
+
+                selective_predictions.append(SelectivePrediction(
+                    boom_frame=result,
+                    accepted=accepted,
+                    accept_score=float(accept_score),
+                    predicted_quality=sample.predicted_quality,
+                    model_predictions=sample.model_predictions_dict,
+                    disagreement=dis,
+                ))
+                true_booms.append(sample.true_boom)
+                true_qualities.append(sample.true_quality)
 
             # Compute metrics for this seed
             metrics = compute_selective_metrics(
@@ -511,120 +526,58 @@ class FormulaExperiment:
             seed_metrics=all_seed_metrics,
         )
 
-    def _apply_acceptance(
-        self,
-        pred: CachedRawPrediction,
-        accept_fn: 'AcceptanceFunction',
-    ) -> SelectivePrediction:
-        """
-        Apply acceptance function to a cached prediction.
-
-        This uses the same acceptance module as deploy_pipeline.py,
-        ensuring identical results.
-        """
-        # Call acceptance function with model predictions and quality
-        accepted, accept_score = accept_fn(pred.model_predictions, pred.predicted_quality)
-
-        # Compute disagreement for metadata
-        pred_values = list(pred.model_predictions.values())
-        if len(pred_values) > 1:
-            disagreement = float(max(pred_values) - min(pred_values))
-        else:
-            disagreement = 0.0
-
-        # Use primary model's prediction for boom_frame
-        primary_pred = pred.model_predictions.get(
-            self.primary_model,
-            pred.primary_prediction  # fallback to first model
-        )
-
-        return SelectivePrediction(
-            boom_frame=primary_pred if accepted else None,
-            accepted=accepted,
-            accept_score=float(accept_score),
-            predicted_quality=pred.predicted_quality,
-            model_predictions=pred.model_predictions,
-            disagreement=disagreement,
-        )
-
     def sweep(
         self,
-        formulas: list[str] | None = None,
-        param_grid: dict | None = None,
+        combiners: list,
         verbose: bool = True,
-    ) -> dict[tuple, MultiSeedSelectiveResult]:
+    ) -> dict[str, MultiSeedSelectiveResult]:
         """
-        Run a sweep over multiple formula configurations.
+        Run a sweep over multiple combiners.
 
         Args:
-            formulas: List of formula names ('sqrt', 'linear', 'sigmoid', 'quadratic')
-            param_grid: Dict of parameter lists to sweep over. Common params:
-                - scale: list[float] - disagreement scale values
-                - threshold: list[float] - accept threshold values
-                - agreement_weight: list[float] - weight for agreement
-                - quality_weight: list[float] - weight for quality
+            combiners: List of Combiner instances to evaluate
             verbose: Print progress
 
         Returns:
-            Dict mapping (formula, scale, threshold) -> MultiSeedSelectiveResult
+            Dict mapping combiner string representation -> MultiSeedSelectiveResult
 
         Example:
-            results = experiment.sweep(
-                formulas=['sqrt', 'linear'],
-                param_grid={
-                    'scale': [5, 10, 15],
-                    'threshold': [0.55, 0.60, 0.65],
-                },
+            from boom_detection.combine import ThresholdCombiner
+
+            combiners = ThresholdCombiner.grid(
+                agreement_transform=['sqrt', 'linear'],
+                disagreement_scale=[5, 10, 15],
+                threshold=[0.60],
             )
+            results = experiment.sweep(combiners)
         """
-        import itertools
-
-        if formulas is None:
-            formulas = ['sqrt']
-        if param_grid is None:
-            param_grid = {'scale': [3.0, 5.0, 7.0, 10.0, 15.0, 20.0], 'threshold': [0.60]}
-
-        # Get parameter names and values
-        param_names = list(param_grid.keys())
-        param_values = [list(param_grid[k]) for k in param_names]
-
-        # Generate all combinations
-        all_param_combos = list(itertools.product(*param_values))
-        total = len(formulas) * len(all_param_combos)
+        total = len(combiners)
 
         if verbose:
-            print(f"\nRunning sweep: {len(formulas)} formulas x {len(all_param_combos)} param combos = {total} configs")
+            print(f"\nRunning sweep: {total} combiners")
             print("-" * 70)
 
         results = {}
-        count = 0
 
-        for formula in formulas:
-            for combo in all_param_combos:
-                count += 1
-                # Build params dict from combo
-                params = dict(zip(param_names, combo))
+        for count, combiner in enumerate(combiners, 1):
+            result = self.evaluate(combiner, verbose=False)
 
-                result = self.evaluate(
-                    acceptance_formula=formula,
-                    acceptance_params=params,
-                    verbose=False,
-                )
+            # Use string representation as key
+            key = str(combiner)
+            results[key] = result
 
-                # Use (formula, scale, threshold) as key for backwards compatibility
-                scale = params.get('scale', 15.0)
-                threshold = params.get('threshold', 0.60)
-                key = (formula, scale, threshold)
-                results[key] = result
-
-                if verbose:
-                    mae = result.mean_metrics.get('selective_mae', float('nan'))
-                    mae_std = result.std_metrics.get('selective_mae', 0)
-                    cov = result.mean_metrics.get('coverage', 0)
-                    print(f"  [{count}/{total}] {formula}/scale={scale:.0f}/thresh={threshold:.2f}: "
-                          f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
+            if verbose:
+                mae = result.mean_metrics.get('selective_mae', float('nan'))
+                mae_std = result.std_metrics.get('selective_mae', 0)
+                cov = result.mean_metrics.get('coverage', 0)
+                print(f"  [{count}/{total}] {key}: "
+                      f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
 
         return results
+
+
+# Backward compatibility alias
+FormulaExperiment = CombinerExperiment
 
 
 # =============================================================================
@@ -1031,53 +984,56 @@ class CachedEvaluator:
         )
 
     # =========================================================================
-    # Formula Experiment Factory
+    # Combiner Experiment Factory
     # =========================================================================
 
-    def create_formula_experiment(
+    def create_combiner_experiment(
         self,
-        predictor_fn: Callable[[], CachedSelectivePredictor],
+        pipeline_factory: Callable[[], CachedSelectivePredictor],
         k: int = 5,
         seeds: list[int] | None = None,
         verbose: bool = True,
-    ) -> FormulaExperiment:
+    ) -> CombinerExperiment:
         """
-        Create a FormulaExperiment by training models once and caching predictions.
+        Create a CombinerExperiment by training models once and caching predictions.
 
-        This is the canonical way to experiment with acceptance formulas.
-        Models are trained once, then you can iterate on formula parameters
-        WITHOUT retraining.
+        This is the canonical way to experiment with combiner configurations.
+        Models are trained once, then you can iterate on combiners WITHOUT retraining.
 
-        GUARANTEE: Results from FormulaExperiment.evaluate() are IDENTICAL
-        to running cross_validate_selective() with the same formula parameters.
+        GUARANTEE: Results from CombinerExperiment.evaluate() are IDENTICAL
+        to running cross_validate_selective() with the same combiner.
 
         Args:
-            predictor_fn: Factory function returning a selective predictor
-                         (must have fit() and predict() methods)
+            pipeline_factory: Factory function returning a pipeline
+                             (must have fit() and predict() methods)
             k: Number of folds (default: 5)
             seeds: List of random seeds (default: [42, 43, 44])
             verbose: Print progress
 
         Returns:
-            FormulaExperiment for iterating on formulas
+            CombinerExperiment for iterating on combiners
 
         Example:
+            from boom_detection.combine import ThresholdCombiner
+
             # Train once (slow)
-            experiment = evaluator.create_formula_experiment(
+            experiment = evaluator.create_combiner_experiment(
                 lambda: BoomDetectionPipeline(),
                 seeds=[42, 43, 44],
             )
 
-            # Iterate on formulas (fast)
+            # Iterate on combiners (fast)
             for scale in [5, 10, 15, 20]:
-                result = experiment.evaluate(agreement_scale=scale)
+                combiner = ThresholdCombiner(disagreement_scale=scale, threshold=0.60)
+                result = experiment.evaluate(combiner)
                 print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
         """
+        from .combine import ModelPrediction
+
         if seeds is None:
             seeds = [42, 43, 44]  # 3 seeds by default for faster iteration
 
-        all_cached_predictions: list[list[CachedRawPrediction]] = []
-        primary_model = 'cnn'  # Will be updated from predictor
+        all_cached_samples: list[list[CachedSample]] = []
 
         total_start = time.time()
 
@@ -1087,7 +1043,7 @@ class CachedEvaluator:
                 print(f"Training seed {seed} ({seed_idx + 1}/{len(seeds)})")
                 print('='*50)
 
-            seed_predictions: list[CachedRawPrediction] = []
+            seed_samples: list[CachedSample] = []
             kf = KFold(n_splits=k, shuffle=True, random_state=seed)
 
             for fold_idx, (train_idx, test_idx) in enumerate(kf.split(self.sim_ids)):
@@ -1101,11 +1057,7 @@ class CachedEvaluator:
                 train_quals = self.boom_qualities[train_idx]
 
                 # Create fresh predictor and train
-                predictor = predictor_fn()
-
-                # Capture primary_model if available
-                if hasattr(predictor, 'primary_model'):
-                    primary_model = predictor.primary_model
+                predictor = pipeline_factory()
 
                 # Pass fold seed if the predictor supports it
                 if hasattr(predictor, 'set_seed'):
@@ -1116,16 +1068,22 @@ class CachedEvaluator:
                 # Get predictions from pipeline
                 predictions = predictor.predict(test_ids, self.cache)
 
-                # Extract raw predictions (model_predictions + predicted_quality)
+                # Extract and cache predictions as ModelPrediction objects
                 for pred, test_i in zip(predictions, test_idx):
                     if isinstance(pred, SelectivePrediction):
                         sp = pred
                     else:
                         sp = SelectivePrediction.from_dict(pred)
 
-                    seed_predictions.append(CachedRawPrediction(
+                    # Convert model_predictions dict to list of ModelPrediction
+                    model_preds = [
+                        ModelPrediction(model=name, frame=frame)
+                        for name, frame in sp.model_predictions.items()
+                    ]
+
+                    seed_samples.append(CachedSample(
                         sim_id=self.sim_ids[test_i],
-                        model_predictions=sp.model_predictions,
+                        predictions=model_preds,
                         predicted_quality=sp.predicted_quality,
                         true_boom=int(self.boom_frames[test_i]),
                         true_quality=float(self.boom_qualities[test_i]),
@@ -1135,22 +1093,37 @@ class CachedEvaluator:
                 if verbose:
                     print(f"  Fold {fold_idx + 1}/{k}: {len(predictions)} predictions ({fold_elapsed:.1f}s)")
 
-            all_cached_predictions.append(seed_predictions)
+            all_cached_samples.append(seed_samples)
 
         total_elapsed = time.time() - total_start
         if verbose:
-            total_preds = sum(len(sp) for sp in all_cached_predictions)
+            total_preds = sum(len(sp) for sp in all_cached_samples)
             print(f"\n{'='*50}")
             print(f"Training complete in {total_elapsed:.1f}s")
-            print(f"Cached {total_preds} raw predictions ({len(seeds)} seeds x ~{len(self.sim_ids)} sims)")
-            print("Now you can iterate on formulas WITHOUT retraining!")
+            print(f"Cached {total_preds} samples ({len(seeds)} seeds x ~{len(self.sim_ids)} sims)")
+            print("Now you can iterate on combiners WITHOUT retraining!")
             print('='*50)
 
-        return FormulaExperiment(
-            cached_predictions=all_cached_predictions,
+        return CombinerExperiment(
+            cached_samples=all_cached_samples,
             seeds=seeds,
             k=k,
-            primary_model=primary_model,
+        )
+
+    # Backward compatibility alias
+    def create_formula_experiment(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int = 5,
+        seeds: list[int] | None = None,
+        verbose: bool = True,
+    ) -> CombinerExperiment:
+        """Deprecated: Use create_combiner_experiment instead."""
+        return self.create_combiner_experiment(
+            pipeline_factory=predictor_fn,
+            k=k,
+            seeds=seeds,
+            verbose=verbose,
         )
 
 

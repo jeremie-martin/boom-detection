@@ -3,20 +3,17 @@ Deployable boom detection pipeline.
 
 This implements the best-performing approach:
 1. Run CNN and HistGBM in parallel
-2. Compute accept_score from model agreement and predicted quality
-3. Accept if accept_score >= threshold
-4. Use CNN prediction for accepted samples (more accurate than HGB)
+2. Use a Combiner to decide whether to accept and what frame to return
+3. Default combiner uses agreement + quality with sqrt transform
 
 Performance (5-fold CV × 5 seeds):
-- MAE: 6.5 ± 0.3 frames (on accepted simulations)
-- Coverage: ~33%
-- Within 5 frames: ~60%
+- MAE: 4.9 ± 1.3 frames at 30% coverage (sqrt/scale=15/threshold=0.60)
+- MAE: 3.4 ± 0.8 frames at 14% coverage (sqrt/scale=5/threshold=0.60)
 
 Key features:
-- Single accept_score threshold instead of separate agreement/quality thresholds
+- Unified Combiner abstraction for acceptance + prediction
 - CNN prediction (not HGB) - more accurate when models agree
 - Random Forest for quality (not Ridge) - better correlation
-- Top 50 quality features with smaller window (±25) - less overfitting
 - Larger CNN kernels (5,11,21) - capture longer-range patterns
 
 Usage:
@@ -26,8 +23,8 @@ Usage:
     # Quick single-seed evaluation (for development)
     uv run python -m boom_detection.deploy_pipeline data --evaluate --quick
 
-    # Custom accept threshold (lower = more samples accepted)
-    uv run python -m boom_detection.deploy_pipeline data --evaluate --accept-threshold 0.45
+    # Custom configuration
+    uv run python -m boom_detection.deploy_pipeline data --evaluate --scale 5 --threshold 0.60
 
     # Train final models and save
     uv run python -m boom_detection.deploy_pipeline data --train --output models/
@@ -39,6 +36,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -49,7 +47,15 @@ from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
 from .logging_config import logger
 from .metrics import SelectivePrediction
 from .sequence_models import CNNClassifier, LSTMClassifier, SequenceTrainer
-from .acceptance import AcceptanceFunction, get_acceptance_fn, ACCEPTANCE_REGISTRY
+from .combine import (
+    ModelPrediction,
+    ThresholdCombiner,
+    Combiner,
+    combiner_to_config,
+    combiner_from_config,
+    default_combiner,
+    disagreement,
+)
 
 # Valid frame model names
 VALID_FRAME_MODELS = ('cnn', 'hgb', 'lstm')
@@ -59,119 +65,83 @@ class BoomDetectionPipeline:
     """
     Production-ready boom detection pipeline.
 
-    Uses model agreement + predicted quality as confidence filters.
-    The accept_score combines these signals into a single scalar for thresholding.
+    Uses a Combiner to decide whether to accept predictions and produce final output.
+    The default ThresholdCombiner uses model agreement + predicted quality.
 
     Supports N frame prediction models for agreement calculation.
-    Agreement is computed as std of model predictions (lower = better agreement).
     """
 
     def __init__(
         self,
-        # New acceptance API
-        acceptance_formula: str = 'sqrt',  # 'sqrt', 'linear', 'sigmoid', 'quadratic'
-        acceptance_params: dict | None = None,  # Params for the formula (scale, threshold, weights)
-        custom_acceptance_fn: AcceptanceFunction | None = None,  # Pass custom function (not serializable)
-        # Other params
-        quality_window: int = 25,  # Window around predicted boom for quality features
-        n_quality_features: int = 50,  # Top correlated features for quality prediction
-        seed: int | None = None,  # Random seed for reproducibility
-        calibrate_quality: bool = True,  # Calibrate quality predictions with isotonic regression
-        frame_models: tuple[str, ...] = ('cnn', 'hgb'),  # Which frame models to use for agreement
-        primary_model: str = 'cnn',  # Which model's prediction to use when accepted
-        feature_config: FeatureConfig | None = None,  # Feature extraction config (saved with model)
+        combiner: Combiner | None = None,
+        quality_window: int = 25,
+        n_quality_features: int = 50,
+        seed: int | None = None,
+        calibrate_quality: bool = True,
+        frame_models: tuple[str, ...] = ('cnn', 'hgb'),
+        feature_config: FeatureConfig | None = None,
     ):
         """
         Initialize boom detection pipeline.
 
         Args:
-            acceptance_formula: Name of acceptance formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
-            acceptance_params: Parameters for the formula. Available params depend on formula:
-                - scale: float - Disagreement at which agreement becomes 0 (default: 15.0 for sqrt)
-                - threshold: float - Accept if accept_score >= threshold (default: 0.60)
-                - agreement_weight: float - Weight for agreement in accept_score (default: 0.4)
-                - quality_weight: float - Weight for quality in accept_score (default: 0.6)
-            custom_acceptance_fn: Pass a custom acceptance function directly. If provided,
-                this overrides acceptance_formula/params. Note: custom functions cannot be
-                serialized with save().
+            combiner: Combiner instance for acceptance/prediction. If None, uses
+                     default ThresholdCombiner(sqrt, scale=15, threshold=0.60).
             quality_window: Window around predicted boom for quality features
             n_quality_features: Top correlated features for quality prediction
             seed: Random seed for reproducibility
             calibrate_quality: Calibrate quality predictions with isotonic regression
-            frame_models: Which frame models to use for agreement ('cnn', 'hgb', 'lstm')
-            primary_model: Which model's prediction to use when accepted
+            frame_models: Which frame models to use ('cnn', 'hgb', 'lstm')
             feature_config: Feature extraction config (saved with model)
         """
         # Validate frame_models
         for model in frame_models:
             if model not in VALID_FRAME_MODELS:
                 raise ValueError(f"Invalid frame model: {model}. Must be one of {VALID_FRAME_MODELS}")
-        if primary_model not in frame_models:
-            raise ValueError(f"primary_model '{primary_model}' must be in frame_models {frame_models}")
 
-        # Set up acceptance function
-        if custom_acceptance_fn is not None:
-            self._acceptance_fn = custom_acceptance_fn
-            self._acceptance_formula = None  # Not serializable
-            self._acceptance_params = None
-        else:
-            if acceptance_formula not in ACCEPTANCE_REGISTRY:
-                available = list(ACCEPTANCE_REGISTRY.keys())
-                raise ValueError(f"Unknown formula: {acceptance_formula}. Available: {available}")
-            self._acceptance_formula = acceptance_formula
-            self._acceptance_params = acceptance_params or {}
-            self._acceptance_fn = get_acceptance_fn(acceptance_formula, self._acceptance_params)
+        # Set up combiner
+        if combiner is None:
+            combiner = default_combiner()
+        self.combiner = combiner
+
+        # Validate that primary_model (if ThresholdCombiner) is in frame_models
+        if isinstance(combiner, ThresholdCombiner):
+            if combiner.primary_model not in frame_models:
+                raise ValueError(
+                    f"Combiner's primary_model '{combiner.primary_model}' "
+                    f"must be in frame_models {frame_models}"
+                )
 
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
         self.frame_models = frame_models
-        self.primary_model = primary_model
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
 
         # Trained models (set during fit)
-        self.trained_models: dict[str, any] = {}  # model_name -> trained model
-        self.trainers: dict[str, SequenceTrainer] = {}  # model_name -> trainer (for PyTorch models)
+        self.trained_models: dict[str, Any] = {}
+        self.trainers: dict[str, SequenceTrainer] = {}
         self.quality_model = None
-        self.quality_calibrator = None  # Optional isotonic regression calibrator
-        self.quality_feature_indices = None  # Top features for quality
+        self.quality_calibrator = None
+        self.quality_feature_indices = None
         self.n_features = None
 
     def set_seed(self, seed: int) -> None:
         """Set the random seed for reproducibility."""
         self.seed = seed
 
-    def set_acceptance(
-        self,
-        formula: str | None = None,
-        params: dict | None = None,
-        custom_fn: AcceptanceFunction | None = None,
-    ) -> None:
+    def set_combiner(self, combiner: Combiner) -> None:
         """
-        Update the acceptance function at runtime.
+        Update the combiner at runtime.
 
-        Useful for FormulaExperiment to test different configurations
+        Useful for CombinerExperiment to test different configurations
         without recreating the pipeline.
 
         Args:
-            formula: Name of acceptance formula (mutually exclusive with custom_fn)
-            params: Parameters for the formula
-            custom_fn: Custom acceptance function (mutually exclusive with formula)
+            combiner: New combiner instance
         """
-        if custom_fn is not None:
-            self._acceptance_fn = custom_fn
-            self._acceptance_formula = None
-            self._acceptance_params = None
-        elif formula is not None:
-            if formula not in ACCEPTANCE_REGISTRY:
-                available = list(ACCEPTANCE_REGISTRY.keys())
-                raise ValueError(f"Unknown formula: {formula}. Available: {available}")
-            self._acceptance_formula = formula
-            self._acceptance_params = params or {}
-            self._acceptance_fn = get_acceptance_fn(formula, self._acceptance_params)
-        else:
-            raise ValueError("Must provide either formula or custom_fn")
+        self.combiner = combiner
 
     def fit(
         self,
@@ -351,34 +321,39 @@ class BoomDetectionPipeline:
             )
 
         # Get predictions from all models
-        model_predictions = {}
+        model_preds = []
+        model_predictions_dict = {}
         for model_name in self.frame_models:
-            model_predictions[model_name] = self._predict_with_model(model_name, features)
+            frame = self._predict_with_model(model_name, features)
+            model_preds.append(ModelPrediction(model_name, frame))
+            model_predictions_dict[model_name] = frame
 
         # Predict quality (using median of predictions as boom estimate)
-        pred_values = list(model_predictions.values())
+        pred_values = [p.frame for p in model_preds]
         median_pred = int(np.median(pred_values))
         predicted_quality = self._predict_quality(features, median_pred)
 
-        # Call acceptance function
-        accepted, accept_score = self._acceptance_fn(model_predictions, predicted_quality)
+        # Call combiner
+        result = self.combiner(model_preds, predicted_quality, features)
+        accepted = result is not None
 
-        # Compute disagreement for metadata (useful for debugging)
-        if len(pred_values) > 1:
-            disagreement = float(max(pred_values) - min(pred_values))
-        else:
-            disagreement = 0.0
+        # Get accept_score if available (for ThresholdCombiner)
+        accept_score = 0.0
+        if hasattr(self.combiner, 'get_score'):
+            accept_score = self.combiner.get_score()
+        elif accepted:
+            accept_score = 1.0  # For non-threshold combiners
 
-        # Use primary model's prediction for boom_frame
-        primary_pred = model_predictions[self.primary_model]
+        # Compute disagreement for metadata
+        dis = disagreement(model_preds, metric='range')
 
         return SelectivePrediction(
-            boom_frame=primary_pred if accepted else None,
+            boom_frame=result,
             accepted=accepted,
             accept_score=float(accept_score),
             predicted_quality=predicted_quality,
-            model_predictions=model_predictions,
-            disagreement=disagreement,
+            model_predictions=model_predictions_dict,
+            disagreement=dis,
         )
 
     def _predict_with_model(self, model_name: str, features: np.ndarray) -> int:
@@ -466,18 +441,16 @@ class BoomDetectionPipeline:
         if self.quality_calibrator is not None:
             joblib.dump(self.quality_calibrator, path / 'quality_calibrator.joblib')
 
-        # Save pipeline config
-        if self._acceptance_formula is None:
+        # Serialize combiner
+        if not hasattr(self.combiner, 'to_config'):
             raise ValueError(
-                "Cannot save pipeline with custom acceptance function. "
-                "Use registry-based formula for serialization."
+                "Cannot save pipeline with non-serializable combiner. "
+                "Use a combiner from boom_detection.combine that supports to_config()."
             )
 
         config = {
             'frame_models': list(self.frame_models),
-            'primary_model': self.primary_model,
-            'acceptance_formula': self._acceptance_formula,
-            'acceptance_params': self._acceptance_params,
+            'combiner': combiner_to_config(self.combiner),
             'quality_window': self.quality_window,
             'n_quality_features': self.n_quality_features,
             'n_features': self.n_features,
@@ -525,21 +498,33 @@ class BoomDetectionPipeline:
 
         # Get frame models from config (with fallback for old saves)
         frame_models = tuple(config.get('frame_models', ['cnn', 'hgb']))
-        primary_model = config.get('primary_model', 'cnn')
 
-        # Get acceptance config - new format uses acceptance_formula/acceptance_params
-        acceptance_formula = config.get('acceptance_formula', 'sqrt')
-        acceptance_params = config.get('acceptance_params', {})
+        # Handle both old and new config formats
+        if 'combiner' in config:
+            # New format: combiner config
+            combiner = combiner_from_config(config['combiner'])
+        else:
+            # Old format: acceptance_formula + acceptance_params + primary_model
+            # Convert to ThresholdCombiner for backward compatibility
+            primary_model = config.get('primary_model', 'cnn')
+            acceptance_formula = config.get('acceptance_formula', 'sqrt')
+            acceptance_params = config.get('acceptance_params', {})
+            combiner = ThresholdCombiner(
+                primary_model=primary_model,
+                agreement_transform=acceptance_formula,
+                disagreement_scale=acceptance_params.get('scale', 15.0),
+                threshold=acceptance_params.get('threshold', 0.60),
+                agreement_weight=acceptance_params.get('agreement_weight', 0.4),
+                quality_weight=acceptance_params.get('quality_weight', 0.6),
+            )
 
         # Create pipeline with saved config
         pipeline = cls(
-            acceptance_formula=acceptance_formula,
-            acceptance_params=acceptance_params,
+            combiner=combiner,
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
             frame_models=frame_models,
-            primary_model=primary_model,
             feature_config=feature_config,
         )
 
@@ -667,8 +652,7 @@ def cross_validate(
     cache: FeatureCache,
     n_splits: int = 5,
     seeds: list[int] | None = None,
-    acceptance_formula: str = 'sqrt',
-    acceptance_params: dict | None = None,
+    combiner: Combiner | None = None,
     verbose: bool = True,
 ) -> dict:
     """
@@ -680,7 +664,7 @@ def cross_validate(
     For new code, prefer using CachedEvaluator directly:
         evaluator = CachedEvaluator(dataset, cache)
         result = evaluator.cross_validate_selective(
-            lambda: BoomDetectionPipeline(acceptance_formula='sqrt'),
+            lambda: BoomDetectionPipeline(combiner=ThresholdCombiner(...)),
         )
 
     Args:
@@ -690,8 +674,7 @@ def cross_validate(
         cache: FeatureCache with extracted features
         n_splits: Number of CV folds
         seeds: Random seeds (default: 5 seeds for robust evaluation)
-        acceptance_formula: Name of acceptance formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
-        acceptance_params: Parameters for the formula (scale, threshold, weights)
+        combiner: Combiner instance (default: ThresholdCombiner with sqrt/scale=15/threshold=0.60)
         verbose: Print progress
 
     Returns:
@@ -701,6 +684,9 @@ def cross_validate(
 
     if seeds is None:
         seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
+
+    if combiner is None:
+        combiner = default_combiner()
 
     # Create a minimal dataset structure for the evaluator
     class MinimalDataset:
@@ -721,14 +707,13 @@ def cross_validate(
     dataset = MinimalDataset(sim_ids, boom_frames, qualities)
     evaluator = CachedEvaluator(dataset, cache)
 
-    # Capture params for the lambda
-    params = acceptance_params or {}
+    # Capture combiner for the lambda (create fresh copies for each pipeline)
+    combiner_config = combiner_to_config(combiner)
 
     # Use the unified evaluator
     result: MultiSeedSelectiveResult = evaluator.cross_validate_selective(
         lambda: BoomDetectionPipeline(
-            acceptance_formula=acceptance_formula,
-            acceptance_params=params,
+            combiner=combiner_from_config(combiner_config),
         ),
         k=n_splits,
         seeds=seeds,
@@ -750,8 +735,7 @@ def cross_validate(
         # Per-seed results for analysis
         'seed_metrics': result.seed_metrics,
         # Config
-        'acceptance_formula': acceptance_formula,
-        'acceptance_params': params,
+        'combiner_config': combiner_config,
         # Also expose the full result object for new code
         '_result': result,
     }
@@ -801,20 +785,21 @@ def main():
         seeds = [42] if args.quick else [42, 43, 44, 45, 46]
         mode = "quick (1 seed)" if args.quick else "robust (5 seeds)"
 
-        # Build acceptance params from CLI args
-        acceptance_params = {
-            'scale': args.scale,
-            'threshold': args.threshold,
-        }
+        # Build combiner from CLI args
+        combiner = ThresholdCombiner(
+            primary_model='cnn',
+            agreement_transform=args.acceptance_formula,
+            disagreement_scale=args.scale,
+            threshold=args.threshold,
+        )
 
         print(f"\nRunning {mode} 5-fold cross-validation...")
-        print(f"Formula: {args.acceptance_formula}, scale={args.scale}, threshold={args.threshold}")
+        print(f"Combiner: {combiner}")
 
         results = cross_validate(
             sim_ids, boom_frames, qualities, cache,
             seeds=seeds,
-            acceptance_formula=args.acceptance_formula,
-            acceptance_params=acceptance_params,
+            combiner=combiner,
         )
 
         print()
@@ -860,8 +845,7 @@ def main():
 
             # Create config dict
             run_config = {
-                'acceptance_formula': args.acceptance_formula,
-                'acceptance_params': acceptance_params,
+                'combiner': results['combiner_config'],
                 'production_features': args.production,
                 'n_splits': results['n_splits'],
                 'seeds': results['seeds'],
@@ -917,19 +901,19 @@ def main():
         if not args.output:
             parser.error("--output required when using --train")
 
-        # Build acceptance params from CLI args
-        train_acceptance_params = {
-            'scale': args.scale,
-            'threshold': args.threshold,
-        }
+        # Build combiner from CLI args
+        train_combiner = ThresholdCombiner(
+            primary_model='cnn',
+            agreement_transform=args.acceptance_formula,
+            disagreement_scale=args.scale,
+            threshold=args.threshold,
+        )
 
         print("\nTraining final models...")
-        print(f"  acceptance_formula: {args.acceptance_formula}")
-        print(f"  acceptance_params: {train_acceptance_params}")
+        print(f"  combiner: {train_combiner}")
 
         pipeline = BoomDetectionPipeline(
-            acceptance_formula=args.acceptance_formula,
-            acceptance_params=train_acceptance_params,
+            combiner=train_combiner,
             calibrate_quality=True,
             feature_config=config,
         )

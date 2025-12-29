@@ -60,12 +60,12 @@ class TestPipelineIntegration:
     )
     def test_train_predict_save_load_roundtrip(self, multi_sim_data):
         """Full pipeline: train → predict → save → load → predict again."""
+        from boom_detection.combine import ThresholdCombiner
         from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
         # Train pipeline
         pipeline = BoomDetectionPipeline(
-            acceptance_formula='sqrt',
-            acceptance_params={'threshold': 0.4},
+            combiner=ThresholdCombiner(threshold=0.4),
             seed=42,
         )
         pipeline.fit(

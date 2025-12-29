@@ -46,7 +46,7 @@ uv run python -m boom_detection.deploy_pipeline data --evaluate \
     --acceptance-formula sqrt --scale 15 --threshold 0.60
 ```
 
-### 2. Experiment with Acceptance Formulas (Gold Standard)
+### 2. Experiment with Combiner Configurations (Gold Standard)
 ```bash
 # Validate documented results and explore parameter space
 uv run python scripts/characterize_acceptance.py data --validate --sweep
@@ -58,7 +58,7 @@ uv run python scripts/characterize_acceptance.py data --validate
 uv run python scripts/characterize_acceptance.py data --sweep --output runs/characterization
 ```
 
-The `characterize_acceptance.py` script uses `FormulaExperiment.sweep()` to explore the parameter space **without retraining models**. This is the correct way to test new formulas or scales.
+The `characterize_acceptance.py` script uses `CombinerExperiment.sweep()` to explore the parameter space **without retraining models**. This is the correct way to test new combiner configurations.
 
 ### 3. Train and Deploy a Model
 ```bash
@@ -83,18 +83,20 @@ uv run python -m boom_detection.deploy_pipeline data --predict models/v1
 
 ### The Deployable Pipeline
 ```python
+from boom_detection.combine import ThresholdCombiner
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# Train pipeline with different selectivity levels using acceptance API:
+# Train pipeline with different selectivity levels using Combiner API:
 # - Most selective: scale=5 -> MAE 3.4 at 14% coverage
 # - Balanced: scale=10 -> MAE 4.9 at 22% coverage
 # - Permissive: scale=15 -> MAE 4.9 at 30% coverage
 pipeline = BoomDetectionPipeline(
-    acceptance_formula='sqrt',        # 'sqrt', 'linear', 'sigmoid', 'quadratic'
-    acceptance_params={
-        'scale': 5.0,                 # Lower = more selective
-        'threshold': 0.60,            # Accept if score >= threshold
-    },
+    combiner=ThresholdCombiner(
+        agreement_transform='sqrt',   # 'sqrt', 'linear', 'sigmoid', 'quadratic'
+        disagreement_scale=5.0,       # Lower = more selective
+        threshold=0.60,               # Accept if score >= threshold
+        primary_model='cnn',          # Use CNN prediction when accepted
+    ),
     frame_models=('cnn', 'hgb'),      # Default: 2-model pipeline
 )
 
@@ -115,6 +117,7 @@ pipeline = BoomDetectionPipeline.from_pretrained(Path("models/v1"))
 ### Robust Evaluation (IMPORTANT!)
 ```python
 # Always use multi-seed evaluation for honest results
+from boom_detection.combine import ThresholdCombiner
 from boom_detection.evaluation import CachedEvaluator
 
 evaluator = CachedEvaluator(dataset, cache)
@@ -129,8 +132,10 @@ print(f"MAE: {result.mean_metrics['mae']:.2f} ± {result.std_metrics['mae']:.2f}
 # For selective (abstaining) models like BoomDetectionPipeline:
 result = evaluator.cross_validate_selective(
     lambda: BoomDetectionPipeline(
-        acceptance_formula='sqrt',
-        acceptance_params={'scale': 15.0, 'threshold': 0.60},
+        combiner=ThresholdCombiner(
+            disagreement_scale=15.0,
+            threshold=0.60,
+        ),
     ),
     seeds=[42, 43, 44, 45, 46],
 )
@@ -184,8 +189,8 @@ artifact.save(Path("runs/my_experiment"))
 | File | Purpose |
 |------|---------|
 | `deploy_pipeline.py` | **Production pipeline** - CLI for evaluate/train/predict |
-| `acceptance.py` | **Acceptance functions** - sqrt, linear, sigmoid, quadratic formulas |
-| `evaluation.py` | **Evaluation framework** - CachedEvaluator, FormulaExperiment, SelectivePrediction |
+| `combine.py` | **Combiner abstraction** - ThresholdCombiner, utility functions |
+| `evaluation.py` | **Evaluation framework** - CachedEvaluator, CombinerExperiment, SelectivePrediction |
 | `features.py` | Feature extraction + caching |
 | `frame_models.py` | HistGBM classifier |
 | `sequence_models.py` | CNN, LSTM, Transformer (PyTorch) |
@@ -195,9 +200,8 @@ artifact.save(Path("runs/my_experiment"))
 
 | Script | When to Use |
 |--------|-------------|
-| `characterize_acceptance.py` | **Experiment with acceptance formulas** - validates results, sweeps parameters |
+| `characterize_acceptance.py` | **Experiment with combiner configurations** - validates results, sweeps parameters |
 | `boom_server.py` | **Deploy for real-time inference** - Unix socket server for C++ integration |
-| `validate_formula_experiment.py` | Verify FormulaExperiment produces identical results to cross_validate |
 | `evaluate_3model_pipeline.py` | Compare 2-model vs 3-model configurations |
 | `evaluate_lstm.py` | Evaluate individual models (CNN/HGB/LSTM) |
 | `comprehensive_evaluation.py` | Full evaluation with caustic formula comparison |
@@ -207,7 +211,7 @@ artifact.save(Path("runs/my_experiment"))
 | Task | Tool |
 |------|------|
 | Evaluate a specific configuration | `deploy_pipeline.py --evaluate` |
-| Experiment with acceptance formulas | `characterize_acceptance.py` |
+| Experiment with combiner configurations | `characterize_acceptance.py` |
 | Train and save a model | `deploy_pipeline.py --train` |
 | Run inference in production | `boom_server.py` or `deploy_pipeline.py --predict` |
 | Test a new frame model | Create script using `CachedEvaluator` |

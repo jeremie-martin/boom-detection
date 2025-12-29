@@ -33,16 +33,26 @@ from .metrics import (
     find_optimal_threshold,
 )
 
-# Acceptance functions (pure numpy, no ML dependencies)
-from .acceptance import (
-    AcceptanceFunction,
-    ACCEPTANCE_REGISTRY,
-    get_acceptance_fn,
-    list_formulas,
-    make_sqrt_acceptance,
-    make_linear_acceptance,
-    make_sigmoid_acceptance,
-    make_quadratic_acceptance,
+# Combiner abstraction (pure numpy, no ML dependencies)
+from .combine import (
+    ModelPrediction,
+    Combiner,
+    ThresholdCombiner,
+    MedianCombiner,
+    NamedModelCombiner,
+    QualityGatedCombiner,
+    AgreementGatedCombiner,
+    MajorityVoteCombiner,
+    combiner_to_config,
+    combiner_from_config,
+    default_combiner,
+    # Utility functions
+    frames,
+    get_prediction,
+    median_frame,
+    mean_frame,
+    disagreement,
+    agreement_score,
 )
 
 __all__ = [
@@ -70,15 +80,24 @@ __all__ = [
     "coverage_at_max_mae",
     "min_mae_at_coverage",
     "find_optimal_threshold",
-    # Acceptance functions (always available)
-    "AcceptanceFunction",
-    "ACCEPTANCE_REGISTRY",
-    "get_acceptance_fn",
-    "list_formulas",
-    "make_sqrt_acceptance",
-    "make_linear_acceptance",
-    "make_sigmoid_acceptance",
-    "make_quadratic_acceptance",
+    # Combiner abstraction (always available)
+    "ModelPrediction",
+    "Combiner",
+    "ThresholdCombiner",
+    "MedianCombiner",
+    "NamedModelCombiner",
+    "QualityGatedCombiner",
+    "AgreementGatedCombiner",
+    "MajorityVoteCombiner",
+    "combiner_to_config",
+    "combiner_from_config",
+    "default_combiner",
+    "frames",
+    "get_prediction",
+    "median_frame",
+    "mean_frame",
+    "disagreement",
+    "agreement_score",
 ]
 
 # =============================================================================
@@ -119,6 +138,8 @@ try:
         MultiSeedResult,
         MultiSeedSelectiveResult,
         robust_evaluate,
+        CombinerExperiment,
+        CachedSample,
     )
     __all__.extend([
         "EvaluationResult",
@@ -130,6 +151,8 @@ try:
         "MultiSeedResult",
         "MultiSeedSelectiveResult",
         "robust_evaluate",
+        "CombinerExperiment",
+        "CachedSample",
     ])
 
     # Frame-level models (require sklearn)

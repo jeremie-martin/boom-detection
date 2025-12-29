@@ -57,44 +57,53 @@ class TestPipelineConfig:
 
     def test_default_config(self):
         """Default config should match documented values."""
+        from boom_detection.combine import ThresholdCombiner
+
         pipeline = BoomDetectionPipeline()
-        # New acceptance API - check internal state
-        assert pipeline._acceptance_formula == 'sqrt'
-        assert pipeline._acceptance_params == {}  # Uses defaults from acceptance module
+        # New combiner API - check internal state
+        assert isinstance(pipeline.combiner, ThresholdCombiner)
+        assert pipeline.combiner.agreement_transform == 'sqrt'
+        assert pipeline.combiner.disagreement_scale == 15.0
+        assert pipeline.combiner.threshold == 0.60
         assert pipeline.quality_window == 25
         assert pipeline.n_quality_features == 50
 
-    def test_custom_acceptance_params(self):
-        """Custom acceptance params should be stored correctly."""
-        pipeline = BoomDetectionPipeline(
-            acceptance_formula='linear',
-            acceptance_params={'scale': 5.0, 'threshold': 0.70},
+    def test_custom_combiner(self):
+        """Custom combiner should be stored correctly."""
+        from boom_detection.combine import ThresholdCombiner
+
+        combiner = ThresholdCombiner(
+            agreement_transform='linear',
+            disagreement_scale=5.0,
+            threshold=0.70,
         )
-        assert pipeline._acceptance_formula == 'linear'
-        assert pipeline._acceptance_params == {'scale': 5.0, 'threshold': 0.70}
+        pipeline = BoomDetectionPipeline(combiner=combiner)
+        assert pipeline.combiner.agreement_transform == 'linear'
+        assert pipeline.combiner.disagreement_scale == 5.0
+        assert pipeline.combiner.threshold == 0.70
 
-    def test_custom_acceptance_fn(self):
-        """Custom acceptance function should work."""
-        def custom_fn(model_predictions, predicted_quality):
-            return True, 0.99  # Always accept with high score
+    def test_custom_combiner_class(self):
+        """Custom combiner class should work."""
+        from boom_detection.combine import MedianCombiner
 
-        pipeline = BoomDetectionPipeline(custom_acceptance_fn=custom_fn)
-        assert pipeline._acceptance_formula is None  # Not serializable
-        assert pipeline._acceptance_fn is custom_fn
+        combiner = MedianCombiner()
+        pipeline = BoomDetectionPipeline(combiner=combiner)
+        assert isinstance(pipeline.combiner, MedianCombiner)
 
-    def test_invalid_formula_raises(self):
-        """Invalid formula should raise ValueError."""
-        with pytest.raises(ValueError, match="Unknown formula"):
-            BoomDetectionPipeline(acceptance_formula='invalid')
+    def test_set_combiner_updates(self):
+        """set_combiner should update the combiner."""
+        from boom_detection.combine import ThresholdCombiner
 
-    def test_set_acceptance_updates_fn(self):
-        """set_acceptance should update the acceptance function."""
-        pipeline = BoomDetectionPipeline(acceptance_formula='sqrt')
-        assert pipeline._acceptance_formula == 'sqrt'
+        pipeline = BoomDetectionPipeline()
+        assert pipeline.combiner.agreement_transform == 'sqrt'
 
-        pipeline.set_acceptance(formula='linear', params={'scale': 5.0})
-        assert pipeline._acceptance_formula == 'linear'
-        assert pipeline._acceptance_params == {'scale': 5.0}
+        new_combiner = ThresholdCombiner(
+            agreement_transform='linear',
+            disagreement_scale=5.0,
+        )
+        pipeline.set_combiner(new_combiner)
+        assert pipeline.combiner.agreement_transform == 'linear'
+        assert pipeline.combiner.disagreement_scale == 5.0
 
 
 class TestPipelineOutput:
@@ -216,13 +225,18 @@ class TestAcceptanceLogic:
 
     def test_boom_frame_set_when_accepted(self, trained_pipeline):
         """boom_frame should equal primary model prediction when accepted."""
+        from boom_detection.combine import ThresholdCombiner
+
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
         if result.accepted:
             # boom_frame should be the primary model's prediction
-            primary_pred = result.model_predictions[pipeline.primary_model]
-            assert result.boom_frame == primary_pred
+            # Get primary_model from the combiner (if ThresholdCombiner)
+            if isinstance(pipeline.combiner, ThresholdCombiner):
+                primary_model = pipeline.combiner.primary_model
+                primary_pred = result.model_predictions[primary_model]
+                assert result.boom_frame == primary_pred
 
 
 class TestThreeModelConfiguration:
@@ -231,6 +245,8 @@ class TestThreeModelConfiguration:
     @pytest.fixture
     def trained_3model_pipeline(self, mock_cache_multi):
         """Create a pipeline with 3 models for testing."""
+        from boom_detection.combine import ThresholdCombiner
+
         pytest.importorskip("torch")
         pytest.importorskip("sklearn")
 
@@ -240,7 +256,7 @@ class TestThreeModelConfiguration:
 
         pipeline = BoomDetectionPipeline(
             frame_models=('cnn', 'hgb', 'lstm'),
-            primary_model='cnn',
+            combiner=ThresholdCombiner(primary_model='cnn'),
         )
         pipeline.fit(sim_ids, boom_frames, qualities, mock_cache_multi)
         return pipeline, mock_cache_multi
@@ -275,7 +291,7 @@ class TestThreeModelConfiguration:
         """Pipeline should preserve 3-model configuration."""
         pipeline, _ = trained_3model_pipeline
         assert pipeline.frame_models == ('cnn', 'hgb', 'lstm')
-        assert pipeline.primary_model == 'cnn'
+        assert pipeline.combiner.primary_model == 'cnn'
 
 
 class TestBaselineFactories:
