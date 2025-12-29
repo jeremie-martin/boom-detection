@@ -216,6 +216,59 @@ class TestAcceptanceLogic:
             assert result.boom_frame == primary_pred
 
 
+class TestThreeModelConfiguration:
+    """Tests for 3-model (CNN + HGB + LSTM) configuration."""
+
+    @pytest.fixture
+    def trained_3model_pipeline(self, mock_cache_multi):
+        """Create a pipeline with 3 models for testing."""
+        pytest.importorskip("torch")
+        pytest.importorskip("sklearn")
+
+        sim_ids = [f"sim_{i}" for i in range(10)]
+        boom_frames = np.array([50] * 10)
+        qualities = np.array([0.7] * 10)
+
+        pipeline = BoomDetectionPipeline(
+            frame_models=('cnn', 'hgb', 'lstm'),
+            primary_model='cnn',
+        )
+        pipeline.fit(sim_ids, boom_frames, qualities, mock_cache_multi)
+        return pipeline, mock_cache_multi
+
+    def test_3model_has_all_predictions(self, trained_3model_pipeline):
+        """3-model pipeline should include all 3 model predictions."""
+        pipeline, cache = trained_3model_pipeline
+        result = pipeline.predict_one(cache["sim_0"])
+
+        assert 'cnn' in result.model_predictions
+        assert 'hgb' in result.model_predictions
+        assert 'lstm' in result.model_predictions
+
+    def test_3model_disagreement_is_std(self, trained_3model_pipeline):
+        """Disagreement should be std of all 3 predictions."""
+        pipeline, cache = trained_3model_pipeline
+        result = pipeline.predict_one(cache["sim_0"])
+
+        preds = list(result.model_predictions.values())
+        expected_std = float(np.std(preds))
+        assert abs(result.disagreement - expected_std) < 1e-6
+
+    def test_3model_primary_is_cnn(self, trained_3model_pipeline):
+        """Primary model should be CNN when configured as primary."""
+        pipeline, cache = trained_3model_pipeline
+        result = pipeline.predict_one(cache["sim_0"])
+
+        if result.accepted:
+            assert result.boom_frame == result.model_predictions['cnn']
+
+    def test_3model_config_preserved(self, trained_3model_pipeline):
+        """Pipeline should preserve 3-model configuration."""
+        pipeline, _ = trained_3model_pipeline
+        assert pipeline.frame_models == ('cnn', 'hgb', 'lstm')
+        assert pipeline.primary_model == 'cnn'
+
+
 class TestBaselineFactories:
     """Tests for baseline factory functions."""
 
