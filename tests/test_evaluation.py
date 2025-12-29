@@ -185,15 +185,15 @@ class TestSelectivePrediction:
         pred = SelectivePrediction(
             boom_frame=50,
             accepted=True,
-            cnn_pred=50,
-            hgb_pred=48,
-            disagreement=2,
+            accept_score=0.8,
             predicted_quality=0.75,
+            model_predictions={'cnn': 50, 'hgb': 48},
+            disagreement=1.0,
         )
 
         assert pred.boom_frame == 50
         assert pred.accepted is True
-        assert pred.disagreement == 2
+        assert pred.disagreement == 1.0
 
     def test_create_rejected_prediction(self):
         """Should create a rejected SelectivePrediction with None boom_frame."""
@@ -202,10 +202,10 @@ class TestSelectivePrediction:
         pred = SelectivePrediction(
             boom_frame=None,
             accepted=False,
-            cnn_pred=50,
-            hgb_pred=70,
-            disagreement=20,
+            accept_score=0.3,
             predicted_quality=0.3,
+            model_predictions={'cnn': 50, 'hgb': 70},
+            disagreement=10.0,
         )
 
         assert pred.boom_frame is None
@@ -218,10 +218,10 @@ class TestSelectivePrediction:
         d = {
             'boom_frame': 50,
             'accepted': True,
-            'cnn_pred': 50,
-            'hgb_pred': 48,
-            'disagreement': 2,
+            'accept_score': 0.8,
             'predicted_quality': 0.75,
+            'model_predictions': {'cnn': 50, 'hgb': 48},
+            'disagreement': 1.0,
         }
 
         pred = SelectivePrediction.from_dict(d)
@@ -235,16 +235,16 @@ class TestSelectivePrediction:
         pred = SelectivePrediction(
             boom_frame=50,
             accepted=True,
-            cnn_pred=50,
-            hgb_pred=48,
-            disagreement=2,
+            accept_score=0.8,
             predicted_quality=0.75,
+            model_predictions={'cnn': 50, 'hgb': 48},
+            disagreement=1.0,
         )
 
         d = pred.to_dict()
         assert d['boom_frame'] == 50
         assert d['accepted'] is True
-        assert 'confidence' not in d  # None confidence not included
+        assert d['model_predictions'] == {'cnn': 50, 'hgb': 48}
 
     def test_roundtrip(self):
         """Should survive to_dict/from_dict roundtrip."""
@@ -253,16 +253,30 @@ class TestSelectivePrediction:
         original = SelectivePrediction(
             boom_frame=50,
             accepted=True,
-            cnn_pred=50,
-            hgb_pred=48,
-            disagreement=2,
+            accept_score=0.9,
             predicted_quality=0.75,
-            confidence=0.9,
+            model_predictions={'cnn': 50, 'hgb': 48},
+            disagreement=1.0,
         )
 
         roundtripped = SelectivePrediction.from_dict(original.to_dict())
         assert roundtripped.boom_frame == original.boom_frame
-        assert roundtripped.confidence == original.confidence
+        assert roundtripped.accept_score == original.accept_score
+
+
+def _make_pred(boom_frame, accepted, accept_score, predicted_quality, preds=None):
+    """Helper to create SelectivePrediction with sensible defaults."""
+    from boom_detection.evaluation import SelectivePrediction
+    if preds is None:
+        preds = {'cnn': boom_frame or 50, 'hgb': boom_frame or 50}
+    return SelectivePrediction(
+        boom_frame=boom_frame,
+        accepted=accepted,
+        accept_score=accept_score,
+        predicted_quality=predicted_quality,
+        model_predictions=preds,
+        disagreement=float(np.std(list(preds.values()))) if len(preds) > 1 else 0.0,
+    )
 
 
 class TestComputeSelectiveMetrics:
@@ -270,12 +284,12 @@ class TestComputeSelectiveMetrics:
 
     def test_all_accepted(self):
         """Should compute metrics when all predictions accepted."""
-        from boom_detection.evaluation import SelectivePrediction, compute_selective_metrics
+        from boom_detection.evaluation import compute_selective_metrics
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
-            SelectivePrediction(60, True, 60, 58, 2, 0.7),
-            SelectivePrediction(70, True, 70, 72, 2, 0.9),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
+            _make_pred(60, True, 0.7, 0.7, {'cnn': 60, 'hgb': 58}),
+            _make_pred(70, True, 0.9, 0.9, {'cnn': 70, 'hgb': 72}),
         ]
         true_booms = np.array([52, 58, 70])
 
@@ -288,12 +302,12 @@ class TestComputeSelectiveMetrics:
 
     def test_partial_acceptance(self):
         """Should compute metrics with some rejections."""
-        from boom_detection.evaluation import SelectivePrediction, compute_selective_metrics
+        from boom_detection.evaluation import compute_selective_metrics
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
-            SelectivePrediction(None, False, 60, 80, 20, 0.3),  # Rejected
-            SelectivePrediction(70, True, 70, 72, 2, 0.9),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
+            _make_pred(None, False, 0.3, 0.3, {'cnn': 60, 'hgb': 80}),  # Rejected
+            _make_pred(70, True, 0.9, 0.9, {'cnn': 70, 'hgb': 72}),
         ]
         true_booms = np.array([52, 58, 70])
 
@@ -307,11 +321,11 @@ class TestComputeSelectiveMetrics:
 
     def test_none_accepted(self):
         """Should handle case where nothing is accepted."""
-        from boom_detection.evaluation import SelectivePrediction, compute_selective_metrics
+        from boom_detection.evaluation import compute_selective_metrics
 
         predictions = [
-            SelectivePrediction(None, False, 50, 80, 30, 0.2),
-            SelectivePrediction(None, False, 60, 90, 30, 0.1),
+            _make_pred(None, False, 0.2, 0.2, {'cnn': 50, 'hgb': 80}),
+            _make_pred(None, False, 0.1, 0.1, {'cnn': 60, 'hgb': 90}),
         ]
         true_booms = np.array([52, 58])
 
@@ -323,12 +337,12 @@ class TestComputeSelectiveMetrics:
 
     def test_with_quality(self):
         """Should include quality metrics when qualities provided."""
-        from boom_detection.evaluation import SelectivePrediction, compute_selective_metrics
+        from boom_detection.evaluation import compute_selective_metrics
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
-            SelectivePrediction(None, False, 60, 80, 20, 0.3),
-            SelectivePrediction(70, True, 70, 72, 2, 0.9),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
+            _make_pred(None, False, 0.3, 0.3, {'cnn': 60, 'hgb': 80}),
+            _make_pred(70, True, 0.9, 0.9, {'cnn': 70, 'hgb': 72}),
         ]
         true_booms = np.array([52, 58, 70])
         true_qualities = np.array([0.8, 0.6, 0.9])
@@ -344,11 +358,11 @@ class TestRunArtifact:
 
     def test_create_artifact(self):
         """Should create artifact from predictions."""
-        from boom_detection.evaluation import SelectivePrediction, RunArtifact
+        from boom_detection.evaluation import RunArtifact
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
-            SelectivePrediction(60, True, 60, 58, 2, 0.7),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
+            _make_pred(60, True, 0.7, 0.7, {'cnn': 60, 'hgb': 58}),
         ]
         true_booms = np.array([52, 58])
         config = {'agreement_threshold': 5, 'quality_threshold': 0.55}
@@ -366,10 +380,10 @@ class TestRunArtifact:
 
     def test_save_and_load(self, tmp_path):
         """Should save to disk and load back."""
-        from boom_detection.evaluation import SelectivePrediction, RunArtifact
+        from boom_detection.evaluation import RunArtifact
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
         ]
         true_booms = np.array([52])
         config = {'test': 'value'}
@@ -399,10 +413,10 @@ class TestRunArtifact:
 
     def test_summary(self):
         """Should generate readable summary."""
-        from boom_detection.evaluation import SelectivePrediction, RunArtifact
+        from boom_detection.evaluation import RunArtifact
 
         predictions = [
-            SelectivePrediction(50, True, 50, 48, 2, 0.8),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 48}),
         ]
         true_booms = np.array([50])
 

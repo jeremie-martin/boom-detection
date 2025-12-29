@@ -41,17 +41,16 @@
  *   {
  *     "status": "ok",
  *     "accepted": true,
- *     "boom_frame": 546,          <-- THE DETECTED BOOM FRAME
- *     "cnn_pred": 546,            <-- CNN model prediction
- *     "hgb_pred": 546,            <-- HistGBM model prediction
- *     "disagreement": 0,          <-- |cnn_pred - hgb_pred|
+ *     "boom_frame": 546,          <-- THE DETECTED BOOM FRAME (this is what you need!)
+ *     "accept_score": 0.796,      <-- Combined confidence (0-1)
  *     "predicted_quality": 0.66,  <-- Quality score (0-1)
- *     "accept_score": 0.796       <-- Combined confidence (0-1)
+ *     "disagreement": 0.0,        <-- Std deviation of model predictions
+ *     "model_predictions": {"cnn": 546, "hgb": 546}  <-- Individual model predictions
  *   }
  *
  *   Interpretation:
  *   - boom_frame is the frame where the boom occurs
- *   - Both models agree (disagreement=0), high quality detected
+ *   - All models agree (low disagreement), high quality detected
  *   - Use this simulation for your animation
  *
  * CASE 2: BOOM NOT DETECTED / REJECTED (accepted=false)
@@ -62,11 +61,10 @@
  *     "status": "ok",
  *     "accepted": false,
  *     "boom_frame": null,         <-- NULL when rejected!
- *     "cnn_pred": 367,            <-- CNN still made a prediction
- *     "hgb_pred": 412,            <-- HGB made a different prediction
- *     "disagreement": 45,         <-- High disagreement = uncertain
+ *     "accept_score": 0.342,      <-- Below threshold (0.60)
  *     "predicted_quality": 0.17,  <-- Low quality simulation
- *     "accept_score": 0.342       <-- Below threshold (0.60)
+ *     "disagreement": 22.5,       <-- High disagreement = uncertain
+ *     "model_predictions": {"cnn": 367, "hgb": 412}  <-- Models disagree
  *   }
  *
  *   Interpretation:
@@ -146,14 +144,10 @@ struct BoomResult {
     // Only valid when accepted=true
     int boom_frame = -1;       // Frame where boom occurs (-1 if rejected)
 
-    // Model predictions (always available when ok=true)
-    int cnn_pred = -1;         // CNN model prediction
-    int hgb_pred = -1;         // HistGBM model prediction
-    int disagreement = -1;     // |cnn_pred - hgb_pred|
-
     // Confidence scores (always available when ok=true)
-    float predicted_quality = 0.0f;  // Quality score (0-1)
     float accept_score = 0.0f;       // Combined confidence (0-1), threshold is 0.60
+    float predicted_quality = 0.0f;  // Quality score (0-1)
+    float disagreement = 0.0f;       // Std deviation of model predictions
 
     // Error info (only when ok=false)
     std::string error_message;
@@ -432,11 +426,9 @@ private:
         auto boom = json::get_int(response, "boom_frame");
         result.boom_frame = boom.value_or(-1);
 
-        result.cnn_pred = json::get_int(response, "cnn_pred").value_or(-1);
-        result.hgb_pred = json::get_int(response, "hgb_pred").value_or(-1);
-        result.disagreement = json::get_int(response, "disagreement").value_or(-1);
-        result.predicted_quality = json::get_float(response, "predicted_quality").value_or(0.0f);
         result.accept_score = json::get_float(response, "accept_score").value_or(0.0f);
+        result.predicted_quality = json::get_float(response, "predicted_quality").value_or(0.0f);
+        result.disagreement = json::get_float(response, "disagreement").value_or(0.0f);
 
         return result;
     }
@@ -528,14 +520,10 @@ void print_result(const BoomResult& result) {
         std::cout << "\n*** SIMULATION REJECTED - generate a new one ***\n";
     }
 
-    std::cout << "\nModel predictions:\n";
-    std::cout << "  CNN prediction: " << result.cnn_pred << "\n";
-    std::cout << "  HGB prediction: " << result.hgb_pred << "\n";
-    std::cout << "  Disagreement:   " << result.disagreement << " frames\n";
-
     std::cout << "\nConfidence scores:\n";
-    std::cout << "  Quality score:  " << result.predicted_quality << " (0-1)\n";
     std::cout << "  Accept score:   " << result.accept_score << " (threshold: 0.60)\n";
+    std::cout << "  Quality score:  " << result.predicted_quality << " (0-1)\n";
+    std::cout << "  Disagreement:   " << result.disagreement << " (std of predictions)\n";
 
     std::cout << "\nRaw JSON:\n  " << result.raw_json << "\n";
 }

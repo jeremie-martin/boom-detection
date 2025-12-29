@@ -83,8 +83,8 @@ def evaluate_cnn_hgb_from_pipeline(
             for sid, true_boom in zip(test_ids, test_booms):
                 features = cache[sid]
                 pred = pipeline.predict_one(features)
-                seed_cnn_errors.append(abs(pred.cnn_pred - true_boom))
-                seed_hgb_errors.append(abs(pred.hgb_pred - true_boom))
+                seed_cnn_errors.append(abs(pred.model_predictions['cnn'] - true_boom))
+                seed_hgb_errors.append(abs(pred.model_predictions['hgb'] - true_boom))
 
         cnn_maes.append(np.mean(seed_cnn_errors))
         hgb_maes.append(np.mean(seed_hgb_errors))

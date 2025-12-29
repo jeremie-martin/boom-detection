@@ -97,11 +97,10 @@ def predict_single(model_path: Path, simulation_path: Path) -> dict:
         'path': str(simulation_path),
         'accepted': result.accepted,
         'boom_frame': result.boom_frame,
-        'cnn_pred': result.cnn_pred,
-        'hgb_pred': result.hgb_pred,
-        'disagreement': result.disagreement,
-        'predicted_quality': result.predicted_quality,
         'accept_score': result.accept_score,
+        'predicted_quality': result.predicted_quality,
+        'disagreement': result.disagreement,
+        'model_predictions': result.model_predictions,
     }
 
 
@@ -136,11 +135,10 @@ def predict_batch(model_path: Path, input_path: Path, output_file: Path | None =
                 'path': str(sim_file),
                 'accepted': result.accepted,
                 'boom_frame': result.boom_frame,
-                'cnn_pred': result.cnn_pred,
-                'hgb_pred': result.hgb_pred,
-                'disagreement': result.disagreement,
-                'predicted_quality': result.predicted_quality,
                 'accept_score': round(result.accept_score, 3),
+                'predicted_quality': result.predicted_quality,
+                'disagreement': round(result.disagreement, 2),
+                'model_predictions': {k: int(v) for k, v in result.model_predictions.items()},
             }
             results.append(entry)
             if result.accepted:
@@ -205,11 +203,10 @@ def main():
             print(f"  Accepted: {result['accepted']}")
             if result['accepted']:
                 print(f"  Boom frame: {result['boom_frame']}")
-            print(f"  CNN prediction: {result['cnn_pred']}")
-            print(f"  HGB prediction: {result['hgb_pred']}")
-            print(f"  Disagreement: {result['disagreement']} frames")
-            print(f"  Predicted quality: {result['predicted_quality']:.2f}")
             print(f"  Accept score: {result['accept_score']:.3f}")
+            print(f"  Predicted quality: {result['predicted_quality']:.2f}")
+            print(f"  Disagreement: {result['disagreement']:.2f}")
+            print(f"  Model predictions: {result['model_predictions']}")
         else:
             # Batch prediction
             predict_batch(args.model_path, args.input, args.output)

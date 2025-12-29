@@ -230,7 +230,7 @@ def run_calibration_check(
 
                 # Use accept_score as confidence
                 confidence = result.accept_score if result.accept_score else 0.0
-                error = abs(result.cnn_pred - test_booms[i])
+                error = abs(result.primary_prediction - test_booms[i])
                 correct = int(error <= error_threshold)
 
                 all_confidences.append(confidence)

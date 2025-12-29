@@ -93,8 +93,7 @@ class TestPipelineIntegration:
 
         # Verify predictions match
         for before, after in zip(preds_before, preds_after):
-            assert before.cnn_pred == after.cnn_pred, "CNN predictions should match"
-            assert before.hgb_pred == after.hgb_pred, "HGB predictions should match"
+            assert before.model_predictions == after.model_predictions, "Model predictions should match"
             assert before.accepted == after.accepted, "Acceptance should match"
             assert abs(before.predicted_quality - after.predicted_quality) < 0.01, \
                 "Quality predictions should match"
@@ -231,12 +230,10 @@ class TestSelectivePredictionSerialization:
         original = SelectivePrediction(
             boom_frame=50,
             accepted=True,
-            cnn_pred=50,
-            hgb_pred=48,
-            disagreement=2,
-            predicted_quality=0.75,
             accept_score=0.68,
-            confidence=0.68,
+            predicted_quality=0.75,
+            model_predictions={'cnn': 50, 'hgb': 48},
+            disagreement=1.0,  # std of [50, 48]
         )
 
         # Convert to dict and back
@@ -246,12 +243,10 @@ class TestSelectivePredictionSerialization:
         # Verify all fields match
         assert loaded.boom_frame == original.boom_frame
         assert loaded.accepted == original.accepted
-        assert loaded.cnn_pred == original.cnn_pred
-        assert loaded.hgb_pred == original.hgb_pred
+        assert loaded.model_predictions == original.model_predictions
         assert loaded.disagreement == original.disagreement
         assert loaded.predicted_quality == original.predicted_quality
         assert loaded.accept_score == original.accept_score
-        assert loaded.confidence == original.confidence
 
     def test_rejected_prediction_roundtrip(self):
         """Verify rejected predictions serialize correctly."""
@@ -260,11 +255,10 @@ class TestSelectivePredictionSerialization:
         original = SelectivePrediction(
             boom_frame=None,  # Rejected
             accepted=False,
-            cnn_pred=50,
-            hgb_pred=65,
-            disagreement=15,
-            predicted_quality=0.3,
             accept_score=0.35,
+            predicted_quality=0.3,
+            model_predictions={'cnn': 50, 'hgb': 65},
+            disagreement=7.5,  # std of [50, 65]
         )
 
         d = original.to_dict()
@@ -275,19 +269,33 @@ class TestSelectivePredictionSerialization:
         assert loaded.accept_score == 0.35
 
 
+def _make_pred(boom_frame, accepted, accept_score, predicted_quality, preds=None):
+    """Helper to create SelectivePrediction with sensible defaults."""
+    from boom_detection.metrics import SelectivePrediction
+    if preds is None:
+        preds = {'cnn': boom_frame or 50, 'hgb': boom_frame or 50}
+    return SelectivePrediction(
+        boom_frame=boom_frame,
+        accepted=accepted,
+        accept_score=accept_score,
+        predicted_quality=predicted_quality,
+        model_predictions=preds,
+        disagreement=float(np.std(list(preds.values()))) if len(preds) > 1 else 0.0,
+    )
+
+
 class TestMetricsConsistency:
     """Tests for metrics calculation consistency."""
 
     def test_selective_metrics_coverage(self):
         """Coverage should match n_accepted / n_total."""
-        from boom_detection.metrics import SelectivePrediction, compute_selective_metrics
-        import numpy as np
+        from boom_detection.metrics import compute_selective_metrics
 
         predictions = [
-            SelectivePrediction(50, True, 50, 50, 0, 0.9, 0.9),
-            SelectivePrediction(60, True, 60, 62, 2, 0.8, 0.8),
-            SelectivePrediction(None, False, 70, 85, 15, 0.3, 0.3),
-            SelectivePrediction(None, False, 80, 95, 15, 0.2, 0.2),
+            _make_pred(50, True, 0.9, 0.9, {'cnn': 50, 'hgb': 50}),
+            _make_pred(60, True, 0.8, 0.8, {'cnn': 60, 'hgb': 62}),
+            _make_pred(None, False, 0.3, 0.3, {'cnn': 70, 'hgb': 85}),
+            _make_pred(None, False, 0.2, 0.2, {'cnn': 80, 'hgb': 95}),
         ]
         true_booms = np.array([51, 61, 75, 85])
 
@@ -300,19 +308,17 @@ class TestMetricsConsistency:
     def test_decision_centric_metrics(self):
         """Test coverage_at_max_mae and min_mae_at_coverage."""
         from boom_detection.metrics import (
-            SelectivePrediction,
             coverage_at_max_mae,
             min_mae_at_coverage,
         )
-        import numpy as np
 
         # Create predictions with varying quality
         # Sorted by accept_score: 0.95, 0.85, 0.65, 0.35
         predictions = [
-            SelectivePrediction(50, True, 50, 50, 0, 0.9, 0.95),  # Error: 1
-            SelectivePrediction(60, True, 60, 60, 0, 0.8, 0.85),  # Error: 2
-            SelectivePrediction(70, True, 70, 70, 0, 0.6, 0.65),  # Error: 5
-            SelectivePrediction(80, True, 80, 80, 0, 0.3, 0.35),  # Error: 10
+            _make_pred(50, True, 0.95, 0.9, {'cnn': 50, 'hgb': 50}),  # Error: 1
+            _make_pred(60, True, 0.85, 0.8, {'cnn': 60, 'hgb': 60}),  # Error: 2
+            _make_pred(70, True, 0.65, 0.6, {'cnn': 70, 'hgb': 70}),  # Error: 5
+            _make_pred(80, True, 0.35, 0.3, {'cnn': 80, 'hgb': 80}),  # Error: 10
         ]
         true_booms = np.array([51, 62, 75, 90])
 
@@ -339,12 +345,11 @@ class TestRunArtifactRoundtrip:
         """RunArtifact should survive save/load roundtrip."""
         import tempfile
         from pathlib import Path
-        from boom_detection.metrics import SelectivePrediction, RunArtifact
-        import numpy as np
+        from boom_detection.metrics import RunArtifact
 
         predictions = [
-            SelectivePrediction(50, True, 50, 50, 0, 0.8, 0.8),
-            SelectivePrediction(None, False, 60, 75, 15, 0.3, 0.3),
+            _make_pred(50, True, 0.8, 0.8, {'cnn': 50, 'hgb': 50}),
+            _make_pred(None, False, 0.3, 0.3, {'cnn': 60, 'hgb': 75}),
         ]
         true_booms = np.array([51, 65])
         true_qualities = np.array([0.9, 0.4])

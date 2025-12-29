@@ -48,7 +48,10 @@ from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
 from .logging_config import logger
 from .metrics import SelectivePrediction
-from .sequence_models import CNNClassifier, SequenceTrainer
+from .sequence_models import CNNClassifier, LSTMClassifier, SequenceTrainer
+
+# Valid frame model names
+VALID_FRAME_MODELS = ('cnn', 'hgb', 'lstm')
 
 
 class BoomDetectionPipeline:
@@ -57,22 +60,33 @@ class BoomDetectionPipeline:
 
     Uses model agreement + predicted quality as confidence filters.
     The accept_score combines these signals into a single scalar for thresholding.
+
+    Supports N frame prediction models for agreement calculation.
+    Agreement is computed as std of model predictions (lower = better agreement).
     """
 
     def __init__(
         self,
-        accept_threshold: float = 0.60,  # Threshold on accept_score (increased from 0.5 to compensate for overconfidence)
+        accept_threshold: float = 0.60,  # Threshold on accept_score
         agreement_weight: float = 0.4,  # Weight for agreement in accept_score
         quality_weight: float = 0.6,  # Weight for quality in accept_score
-        agreement_formula: str = 'linear',  # 'linear' or 'sqrt'
+        agreement_formula: str = 'sqrt',  # 'linear' or 'sqrt'
         agreement_scale: float | None = None,  # Scale for agreement (default: 10 for linear, 15 for sqrt)
-        quality_window: int = 25,  # Smaller window works better
-        n_quality_features: int = 50,  # Top correlated features
+        quality_window: int = 25,  # Window around predicted boom for quality features
+        n_quality_features: int = 50,  # Top correlated features for quality prediction
         seed: int | None = None,  # Random seed for reproducibility
-        calibrate_quality: bool = True,  # Calibrate quality predictions
-        hgb_feature_subset: tuple[str, ...] | None = None,  # Feature names for HGB (None = use all)
+        calibrate_quality: bool = True,  # Calibrate quality predictions with isotonic regression
+        frame_models: tuple[str, ...] = ('cnn', 'hgb'),  # Which frame models to use for agreement
+        primary_model: str = 'cnn',  # Which model's prediction to use when accepted
         feature_config: FeatureConfig | None = None,  # Feature extraction config (saved with model)
     ):
+        # Validate frame_models
+        for model in frame_models:
+            if model not in VALID_FRAME_MODELS:
+                raise ValueError(f"Invalid frame model: {model}. Must be one of {VALID_FRAME_MODELS}")
+        if primary_model not in frame_models:
+            raise ValueError(f"primary_model '{primary_model}' must be in frame_models {frame_models}")
+
         self.accept_threshold = accept_threshold
         self.agreement_weight = agreement_weight
         self.quality_weight = quality_weight
@@ -86,17 +100,16 @@ class BoomDetectionPipeline:
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
-        self.hgb_feature_subset = hgb_feature_subset
+        self.frame_models = frame_models
+        self.primary_model = primary_model
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
 
-        # Models (set during training)
-        self.cnn = None
-        self.cnn_trainer = None
-        self.hgb = None
+        # Trained models (set during fit)
+        self.trained_models: dict[str, any] = {}  # model_name -> trained model
+        self.trainers: dict[str, SequenceTrainer] = {}  # model_name -> trainer (for PyTorch models)
         self.quality_model = None
         self.quality_calibrator = None  # Optional isotonic regression calibrator
         self.quality_feature_indices = None  # Top features for quality
-        self.hgb_feature_indices = None  # Indices for HGB feature subset
         self.n_features = None
 
     def set_seed(self, seed: int) -> None:
@@ -112,67 +125,96 @@ class BoomDetectionPipeline:
     ) -> None:
         """Train all models on the given data."""
         fit_start = time.time()
-        logger.info("Training pipeline on {} simulations...", len(sim_ids))
+        logger.info("Training pipeline on {} simulations with models: {}",
+                   len(sim_ids), self.frame_models)
 
         # Get feature count
         self.n_features = cache[sim_ids[0]].shape[1]
 
-        # Derive seeds for each model component (deterministic from self.seed)
-        cnn_seed = self.seed
-        hgb_seed = (self.seed + 1000) if self.seed is not None else 42
-        quality_seed = (self.seed + 2000) if self.seed is not None else 42
+        # Train each frame model
+        for i, model_name in enumerate(self.frame_models):
+            # Derive deterministic seed for this model
+            model_seed = (self.seed + i * 1000) if self.seed is not None else 42
 
-        # Train CNN with optimized architecture
-        # Larger kernels (5,11,21) capture longer-range temporal patterns
-        # hidden_dim=64 gives more capacity without overfitting
-        logger.debug("Training CNN (hidden_dim=64, kernels=5,11,21)...")
-        cnn_start = time.time()
-        self.cnn = CNNClassifier(
+            if model_name == 'cnn':
+                self._train_cnn(sim_ids, boom_frames, cache, model_seed)
+            elif model_name == 'hgb':
+                self._train_hgb(sim_ids, boom_frames, cache, model_seed)
+            elif model_name == 'lstm':
+                self._train_lstm(sim_ids, boom_frames, cache, model_seed)
+
+        # Train quality predictor
+        quality_seed = (self.seed + len(self.frame_models) * 1000) if self.seed is not None else 42
+        self._train_quality_model(sim_ids, boom_frames, qualities, cache, quality_seed)
+
+        total_time = time.time() - fit_start
+        logger.info("Pipeline training complete in {:.1f}s", total_time)
+
+    def _train_cnn(self, sim_ids, boom_frames, cache, seed):
+        """Train CNN model."""
+        logger.debug("Training CNN...")
+        start = time.time()
+        model = CNNClassifier(
             n_features=self.n_features,
             hidden_dim=64,
             kernel_sizes=(5, 11, 21)
         )
-        self.cnn_trainer = SequenceTrainer(
-            self.cnn, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
-            seed=cnn_seed,
+        trainer = SequenceTrainer(
+            model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+            seed=seed,
         )
-        self.cnn_trainer.fit(sim_ids, boom_frames, cache)
-        logger.debug("CNN trained in {:.1f}s", time.time() - cnn_start)
+        trainer.fit(sim_ids, boom_frames, cache)
+        self.trained_models['cnn'] = model
+        self.trainers['cnn'] = trainer
+        logger.debug("CNN trained in {:.1f}s", time.time() - start)
 
-        # Train HistGBM
+    def _train_lstm(self, sim_ids, boom_frames, cache, seed):
+        """Train LSTM model."""
+        logger.debug("Training LSTM...")
+        start = time.time()
+        model = LSTMClassifier(
+            n_features=self.n_features,
+            hidden_dim=128,
+            n_layers=2,
+            dropout=0.3,
+        )
+        trainer = SequenceTrainer(
+            model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+            seed=seed,
+        )
+        trainer.fit(sim_ids, boom_frames, cache)
+        self.trained_models['lstm'] = model
+        self.trainers['lstm'] = trainer
+        logger.debug("LSTM trained in {:.1f}s", time.time() - start)
+
+    def _train_hgb(self, sim_ids, boom_frames, cache, seed):
+        """Train HistGradientBoosting model."""
         logger.debug("Training HistGBM...")
+        start = time.time()
 
-        # Resolve HGB feature subset to indices
-        if self.hgb_feature_subset is not None:
-            self.hgb_feature_indices = [cache.index(name) for name in self.hgb_feature_subset]
-            logger.debug("Using {} features for HGB: {}", len(self.hgb_feature_indices),
-                        self.hgb_feature_subset[:5])
-        else:
-            self.hgb_feature_indices = None  # Use all features
-
+        # Build frame-level training data
         X_train, y_train = [], []
         for sid, boom in zip(sim_ids, boom_frames):
             feats = cache[sid]
-            # Apply feature selection if specified
-            if self.hgb_feature_indices is not None:
-                feats = feats[:, self.hgb_feature_indices]
             for t in range(len(feats)):
                 X_train.append(feats[t])
                 y_train.append(1 if t >= boom else 0)
 
-        hgb_start = time.time()
-        self.hgb = HistGradientBoostingClassifier(
-            max_iter=200, max_depth=7, random_state=hgb_seed
+        model = HistGradientBoostingClassifier(
+            max_iter=200, max_depth=7, random_state=seed
         )
-        self.hgb.fit(np.array(X_train), np.array(y_train))
-        logger.debug("HistGBM trained in {:.1f}s on {} frame samples", time.time() - hgb_start, len(X_train))
+        model.fit(np.array(X_train), np.array(y_train))
+        self.trained_models['hgb'] = model
+        logger.debug("HistGBM trained in {:.1f}s on {} frames", time.time() - start, len(X_train))
 
-        # Train quality predictor with feature selection
+    def _train_quality_model(self, sim_ids, boom_frames, qualities, cache, seed):
+        """Train quality prediction model."""
         logger.debug("Training quality predictor...")
-        # IMPORTANT: Add jitter to boom frame during training to simulate prediction noise
+
+        # Add jitter to boom frame during training to simulate prediction noise
         # This prevents train/inference mismatch since at inference we use predicted boom
-        jitter_std = 5  # Standard deviation of jitter (typical CNN/HGB error is ~5-10 frames)
-        rng = np.random.RandomState(quality_seed)
+        jitter_std = 5  # Standard deviation of jitter (typical model error is ~5-10 frames)
+        rng = np.random.RandomState(seed)
 
         X_qual = []
         for sid, boom in zip(sim_ids, boom_frames):
@@ -197,24 +239,21 @@ class BoomDetectionPipeline:
         # Train on selected features using Random Forest
         X_qual_selected = X_qual[:, self.quality_feature_indices]
         self.quality_model = RandomForestRegressor(
-            n_estimators=50, max_depth=5, random_state=quality_seed
+            n_estimators=50, max_depth=5, random_state=seed
         )
         self.quality_model.fit(X_qual_selected, qualities)
 
         # Optional: Calibrate quality predictions using isotonic regression
-        # This makes the predicted quality match the empirical probability
         if self.calibrate_quality:
             from sklearn.isotonic import IsotonicRegression
 
-            # Get out-of-bag predictions for calibration
-            # Use leave-one-out since we have few samples
+            # Get out-of-bag predictions for calibration (leave-one-out)
             raw_predictions = np.zeros(len(qualities))
             for i in range(len(X_qual_selected)):
-                # Train on all except i
                 mask = np.ones(len(X_qual_selected), dtype=bool)
                 mask[i] = False
                 temp_model = RandomForestRegressor(
-                    n_estimators=50, max_depth=5, random_state=quality_seed
+                    n_estimators=50, max_depth=5, random_state=seed
                 )
                 temp_model.fit(X_qual_selected[mask], qualities[mask])
                 raw_predictions[i] = temp_model.predict([X_qual_selected[i]])[0]
@@ -226,9 +265,6 @@ class BoomDetectionPipeline:
             self.quality_calibrator.fit(raw_predictions, qualities)
             logger.debug("Quality calibrator fitted")
 
-        total_time = time.time() - fit_start
-        logger.info("Pipeline training complete in {:.1f}s", total_time)
-
     def predict_one(self, features: np.ndarray) -> SelectivePrediction:
         """
         Predict boom frame for a single simulation.
@@ -237,14 +273,7 @@ class BoomDetectionPipeline:
             features: Shape (frames, n_features)
 
         Returns:
-            SelectivePrediction with:
-                - boom_frame: Predicted boom frame (or None if rejected)
-                - accepted: Whether simulation passed filters
-                - cnn_pred: CNN prediction
-                - hgb_pred: HGB prediction
-                - disagreement: |CNN - HGB|
-                - predicted_quality: Quality prediction
-                - confidence: Combined confidence score
+            SelectivePrediction with model predictions and confidence scores
 
         Raises:
             TypeError: If features is not a numpy array
@@ -254,7 +283,7 @@ class BoomDetectionPipeline:
         import torch
 
         # Input validation
-        if self.cnn is None or self.hgb is None:
+        if not self.trained_models:
             raise RuntimeError("Pipeline not fitted. Call fit() first.")
         if not isinstance(features, np.ndarray):
             raise TypeError(f"Expected ndarray, got {type(features).__name__}")
@@ -266,55 +295,29 @@ class BoomDetectionPipeline:
                 "Ensure feature extraction uses the same config as training."
             )
 
-        # CNN prediction
-        self.cnn.eval()
-        with torch.no_grad():
-            feats_t = torch.from_numpy(features.astype(np.float32)).unsqueeze(0)
-            feats_t = feats_t.to(self.cnn_trainer.device)
-            logits = self.cnn(feats_t)
-            probs_cnn = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+        # Get predictions from all models
+        model_predictions = {}
+        for model_name in self.frame_models:
+            model_predictions[model_name] = self._predict_with_model(model_name, features)
 
-        crossings = np.where(probs_cnn >= 0.5)[0]
-        cnn_pred = int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs_cnn))
-
-        # HGB prediction (with optional feature selection)
-        hgb_features = features
-        if self.hgb_feature_indices is not None:
-            hgb_features = features[:, self.hgb_feature_indices]
-        probs_hgb = self.hgb.predict_proba(hgb_features)[:, 1]
-        crossings = np.where(probs_hgb >= 0.5)[0]
-        hgb_pred = int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs_hgb))
-
-        # Check agreement
-        disagreement = abs(cnn_pred - hgb_pred)
-
-        # Predict quality (using average of predictions as boom estimate)
-        avg_pred = int((cnn_pred + hgb_pred) / 2)
-        start = max(0, avg_pred - self.quality_window)
-        end = min(len(features), avg_pred + self.quality_window)
-        window_feats = features[start:end].mean(axis=0)
-        # Use selected features
-        window_feats_selected = window_feats[self.quality_feature_indices]
-        raw_quality = float(self.quality_model.predict([window_feats_selected])[0])
-
-        # Apply calibration if available
-        if self.quality_calibrator is not None:
-            predicted_quality = float(np.clip(
-                self.quality_calibrator.predict([raw_quality])[0], 0, 1
-            ))
+        # Compute disagreement as std of predictions (0 = perfect agreement)
+        pred_values = list(model_predictions.values())
+        if len(pred_values) > 1:
+            disagreement = float(np.std(pred_values))
         else:
-            predicted_quality = float(np.clip(raw_quality, 0, 1))
+            disagreement = 0.0
 
-        # Compute accept_score: single scalar combining agreement and quality
-        # agreement_score: 1.0 = perfect agreement, 0.0 = disagreement >= scale frames
+        # Predict quality (using median of predictions as boom estimate)
+        median_pred = int(np.median(pred_values))
+        predicted_quality = self._predict_quality(features, median_pred)
+
+        # Compute agreement score (1.0 = perfect, 0.0 = max disagreement)
         if self.agreement_formula == 'sqrt':
-            # sqrt formula: 1 - sqrt(min(diff/scale, 1.0))
             agreement_score = 1.0 - np.sqrt(min(disagreement / self.agreement_scale, 1.0))
         else:
-            # linear formula: 1 - min(diff/scale, 1.0)
             agreement_score = 1.0 - min(disagreement / self.agreement_scale, 1.0)
 
-        # Weighted combination (weights sum to 1.0)
+        # Combine agreement and quality into accept_score
         accept_score = (
             self.agreement_weight * agreement_score +
             self.quality_weight * predicted_quality
@@ -323,16 +326,58 @@ class BoomDetectionPipeline:
         # Accept if score exceeds threshold
         accepted = accept_score >= self.accept_threshold
 
+        # Use primary model's prediction for boom_frame
+        primary_pred = model_predictions[self.primary_model]
+
         return SelectivePrediction(
-            boom_frame=cnn_pred if accepted else None,  # CNN is more accurate
+            boom_frame=primary_pred if accepted else None,
             accepted=accepted,
-            cnn_pred=cnn_pred,
-            hgb_pred=hgb_pred,
-            disagreement=disagreement,
+            accept_score=float(accept_score),
             predicted_quality=predicted_quality,
-            accept_score=accept_score,
-            confidence=accept_score,  # Deprecated alias
+            model_predictions=model_predictions,
+            disagreement=disagreement,
         )
+
+    def _predict_with_model(self, model_name: str, features: np.ndarray) -> int:
+        """Get boom frame prediction from a specific model."""
+        import torch
+
+        if model_name in ('cnn', 'lstm'):
+            # PyTorch sequence model
+            model = self.trained_models[model_name]
+            trainer = self.trainers[model_name]
+            model.eval()
+            with torch.no_grad():
+                feats_t = torch.from_numpy(features.astype(np.float32)).unsqueeze(0)
+                feats_t = feats_t.to(trainer.device)
+                logits = model(feats_t)
+                probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+            crossings = np.where(probs >= 0.5)[0]
+            return int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs))
+
+        elif model_name == 'hgb':
+            # HistGradientBoosting model
+            model = self.trained_models['hgb']
+            probs = model.predict_proba(features)[:, 1]
+            crossings = np.where(probs >= 0.5)[0]
+            return int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs))
+
+        else:
+            raise ValueError(f"Unknown model: {model_name}")
+
+    def _predict_quality(self, features: np.ndarray, boom_estimate: int) -> float:
+        """Predict quality score given features and boom estimate."""
+        start = max(0, boom_estimate - self.quality_window)
+        end = min(len(features), boom_estimate + self.quality_window)
+        window_feats = features[start:end].mean(axis=0)
+        window_feats_selected = window_feats[self.quality_feature_indices]
+        raw_quality = float(self.quality_model.predict([window_feats_selected])[0])
+
+        if self.quality_calibrator is not None:
+            return float(np.clip(
+                self.quality_calibrator.predict([raw_quality])[0], 0, 1
+            ))
+        return float(np.clip(raw_quality, 0, 1))
 
     def predict(self, sim_ids: list[str], cache: FeatureCache) -> list[SelectivePrediction]:
         """Predict for multiple simulations."""
@@ -342,43 +387,46 @@ class BoomDetectionPipeline:
         """
         Save the pipeline to a directory.
 
-        Creates:
-            path/cnn.pt - CNN model weights
-            path/hgb.joblib - HistGBM model
-            path/quality.joblib - Quality model
-            path/config.json - Pipeline configuration
-            path/feature_config.json - Feature extraction config
-
-        Args:
-            path: Directory to save to
+        Creates model files for each frame model (cnn.pt, lstm.pt, hgb.joblib, etc.)
+        plus quality.joblib, config.json, and feature_config.json.
         """
         import torch
         import joblib
         from dataclasses import asdict
 
-        if self.cnn is None:
+        if not self.trained_models:
             raise RuntimeError("Pipeline not fitted. Call fit() first.")
 
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # Save CNN with exact architecture parameters
-        torch.save({
-            'state_dict': self.cnn.state_dict(),
-            'n_features': self.cnn.n_features,
-            'hidden_dim': self.cnn.hidden_dim,
-            'kernel_sizes': self.cnn.kernel_sizes,
-            'dropout': self.cnn.dropout,
-        }, path / 'cnn.pt')
+        # Save each frame model
+        for model_name in self.frame_models:
+            model = self.trained_models[model_name]
+            if model_name in ('cnn', 'lstm'):
+                # PyTorch models - save with architecture params
+                torch.save({
+                    'state_dict': model.state_dict(),
+                    'n_features': model.n_features,
+                    'hidden_dim': model.hidden_dim,
+                    'model_type': model_name,
+                    # Model-specific params
+                    **({'kernel_sizes': model.kernel_sizes, 'dropout': model.dropout}
+                       if model_name == 'cnn' else
+                       {'n_layers': model.n_layers, 'dropout': model.dropout}),
+                }, path / f'{model_name}.pt')
+            elif model_name == 'hgb':
+                joblib.dump(model, path / 'hgb.joblib')
 
-        # Save HGB and quality model
-        joblib.dump(self.hgb, path / 'hgb.joblib')
+        # Save quality model
         joblib.dump(self.quality_model, path / 'quality.joblib')
         if self.quality_calibrator is not None:
             joblib.dump(self.quality_calibrator, path / 'quality_calibrator.joblib')
 
         # Save pipeline config
         config = {
+            'frame_models': list(self.frame_models),
+            'primary_model': self.primary_model,
             'accept_threshold': self.accept_threshold,
             'agreement_weight': self.agreement_weight,
             'quality_weight': self.quality_weight,
@@ -389,18 +437,16 @@ class BoomDetectionPipeline:
             'n_features': self.n_features,
             'quality_feature_indices': self.quality_feature_indices,
             'calibrate_quality': self.calibrate_quality,
-            'hgb_feature_subset': list(self.hgb_feature_subset) if self.hgb_feature_subset else None,
-            'hgb_feature_indices': self.hgb_feature_indices,
         }
         with open(path / 'config.json', 'w') as f:
             json.dump(config, f, indent=2)
 
-        # Save feature extraction config (critical for deployment)
+        # Save feature extraction config
         feature_config_dict = asdict(self.feature_config)
         with open(path / 'feature_config.json', 'w') as f:
             json.dump(feature_config_dict, f, indent=2)
 
-        logger.info("Pipeline saved to {}", path)
+        logger.info("Pipeline saved to {} (models: {})", path, self.frame_models)
 
     @classmethod
     def from_pretrained(cls, path: Path, device: str = 'auto') -> 'BoomDetectionPipeline':
@@ -409,7 +455,7 @@ class BoomDetectionPipeline:
 
         Args:
             path: Directory containing saved models
-            device: Device for CNN ('auto', 'cuda', 'cpu')
+            device: Device for PyTorch models ('auto', 'cuda', 'cpu')
 
         Returns:
             Loaded BoomDetectionPipeline ready for inference
@@ -423,7 +469,7 @@ class BoomDetectionPipeline:
         with open(path / 'config.json') as f:
             config = json.load(f)
 
-        # Load feature config (for inference on new simulations)
+        # Load feature config
         feature_config = None
         feature_config_path = path / 'feature_config.json'
         if feature_config_path.exists():
@@ -431,46 +477,60 @@ class BoomDetectionPipeline:
                 feature_config_dict = json.load(f)
                 feature_config = FeatureConfig(**feature_config_dict)
 
+        # Get frame models from config (with fallback for old saves)
+        frame_models = tuple(config.get('frame_models', ['cnn', 'hgb']))
+        primary_model = config.get('primary_model', 'cnn')
+
         # Create pipeline with saved config
-        hgb_subset = config.get('hgb_feature_subset')
         pipeline = cls(
             accept_threshold=config.get('accept_threshold', 0.60),
             agreement_weight=config.get('agreement_weight', 0.4),
             quality_weight=config.get('quality_weight', 0.6),
-            agreement_formula=config.get('agreement_formula', 'linear'),
-            agreement_scale=config.get('agreement_scale'),  # None triggers default
+            agreement_formula=config.get('agreement_formula', 'sqrt'),
+            agreement_scale=config.get('agreement_scale'),
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
-            hgb_feature_subset=tuple(hgb_subset) if hgb_subset else None,
+            frame_models=frame_models,
+            primary_model=primary_model,
             feature_config=feature_config,
         )
 
         pipeline.n_features = config['n_features']
         pipeline.quality_feature_indices = config['quality_feature_indices']
-        pipeline.hgb_feature_indices = config.get('hgb_feature_indices')
-
-        # Load CNN with exact saved architecture
-        checkpoint = torch.load(path / 'cnn.pt', map_location='cpu', weights_only=True)
-        pipeline.cnn = CNNClassifier(
-            n_features=checkpoint['n_features'],
-            hidden_dim=checkpoint['hidden_dim'],
-            kernel_sizes=tuple(checkpoint['kernel_sizes']),
-            dropout=checkpoint.get('dropout', 0.3),
-        )
-        pipeline.cnn.load_state_dict(checkpoint['state_dict'])
 
         # Set up device
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        pipeline.cnn = pipeline.cnn.to(device)
-        pipeline.cnn.eval()
 
-        # Create minimal trainer for device tracking
-        pipeline.cnn_trainer = SequenceTrainer(pipeline.cnn, device=device)
+        # Load each frame model
+        for model_name in frame_models:
+            if model_name in ('cnn', 'lstm'):
+                checkpoint = torch.load(path / f'{model_name}.pt', map_location='cpu', weights_only=True)
+                if model_name == 'cnn':
+                    model = CNNClassifier(
+                        n_features=checkpoint['n_features'],
+                        hidden_dim=checkpoint['hidden_dim'],
+                        kernel_sizes=tuple(checkpoint['kernel_sizes']),
+                        dropout=checkpoint.get('dropout', 0.3),
+                    )
+                else:  # lstm
+                    model = LSTMClassifier(
+                        n_features=checkpoint['n_features'],
+                        hidden_dim=checkpoint['hidden_dim'],
+                        n_layers=checkpoint.get('n_layers', 2),
+                        dropout=checkpoint.get('dropout', 0.3),
+                    )
+                model.load_state_dict(checkpoint['state_dict'])
+                model = model.to(device)
+                model.eval()
+                pipeline.trained_models[model_name] = model
+                pipeline.trainers[model_name] = SequenceTrainer(model, device=device)
 
-        # Load sklearn models
-        pipeline.hgb = joblib.load(path / 'hgb.joblib')
+            elif model_name == 'hgb':
+                pipeline.trained_models['hgb'] = joblib.load(path / 'hgb.joblib')
+
+        # Load quality model
         pipeline.quality_model = joblib.load(path / 'quality.joblib')
 
         # Load calibrator if available
@@ -503,7 +563,7 @@ class BoomDetectionPipeline:
         """
         from .features import FeatureExtractor
 
-        if self.cnn is None:
+        if not self.trained_models:
             raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
 
         # Wrap raw array in a simple object with .data attribute
@@ -546,7 +606,7 @@ class BoomDetectionPipeline:
         """
         from .loader import load_simulation
 
-        if self.cnn is None:
+        if not self.trained_models:
             raise RuntimeError("Pipeline not loaded. Use from_pretrained() first.")
 
         simulation = load_simulation(simulation_path)

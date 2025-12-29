@@ -178,8 +178,8 @@ def run_agreement_sweep(
 
             for test_id in test_ids:
                 result = pipeline.predict_one(cache[test_id])
-                cnn_preds.append(result.cnn_pred)
-                hgb_preds.append(result.hgb_pred)
+                cnn_preds.append(result.model_predictions['cnn'])
+                hgb_preds.append(result.model_predictions['hgb'])
                 quality_preds.append(result.predicted_quality)
 
             cnn_preds = np.array(cnn_preds)

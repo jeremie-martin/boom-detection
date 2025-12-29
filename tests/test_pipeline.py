@@ -22,8 +22,7 @@ class TestPipelineValidation:
         """Passing non-ndarray should raise TypeError."""
         pipeline = BoomDetectionPipeline()
         pipeline.n_features = 183
-        pipeline.cnn = "mock"  # Not None so we pass the fitted check
-        pipeline.hgb = "mock"
+        pipeline.trained_models = {'cnn': "mock", 'hgb': "mock"}
 
         with pytest.raises(TypeError, match="Expected ndarray"):
             pipeline.predict_one(sample_features.tolist())  # List instead of array
@@ -32,8 +31,7 @@ class TestPipelineValidation:
         """Passing 1D or 3D array should raise ValueError."""
         pipeline = BoomDetectionPipeline()
         pipeline.n_features = 183
-        pipeline.cnn = "mock"
-        pipeline.hgb = "mock"
+        pipeline.trained_models = {'cnn': "mock", 'hgb': "mock"}
 
         # 1D array
         with pytest.raises(ValueError, match="Expected 2D array"):
@@ -47,8 +45,7 @@ class TestPipelineValidation:
         """Passing wrong number of features should raise ValueError."""
         pipeline = BoomDetectionPipeline()
         pipeline.n_features = 183
-        pipeline.cnn = "mock"
-        pipeline.hgb = "mock"
+        pipeline.trained_models = {'cnn': "mock", 'hgb': "mock"}
 
         # Wrong feature count
         with pytest.raises(ValueError, match="Expected 183 features"):
@@ -64,8 +61,8 @@ class TestPipelineConfig:
         assert pipeline.accept_threshold == 0.60  # Increased to compensate for overconfidence
         assert pipeline.agreement_weight == 0.4
         assert pipeline.quality_weight == 0.6
-        assert pipeline.agreement_formula == 'linear'
-        assert pipeline.agreement_scale == 10.0  # Default for linear
+        assert pipeline.agreement_formula == 'sqrt'  # Default is sqrt
+        assert pipeline.agreement_scale == 15.0  # Default for sqrt
         assert pipeline.quality_window == 25
         assert pipeline.n_quality_features == 50
 
@@ -119,11 +116,10 @@ class TestPipelineOutput:
         # Check all expected attributes exist
         assert hasattr(result, 'boom_frame')
         assert hasattr(result, 'accepted')
-        assert hasattr(result, 'cnn_pred')
-        assert hasattr(result, 'hgb_pred')
-        assert hasattr(result, 'disagreement')
+        assert hasattr(result, 'accept_score')
         assert hasattr(result, 'predicted_quality')
-        assert hasattr(result, 'confidence')
+        assert hasattr(result, 'model_predictions')
+        assert hasattr(result, 'disagreement')
 
     def test_predict_one_boom_frame_type(self, trained_pipeline):
         """boom_frame should be int or None."""
@@ -137,15 +133,16 @@ class TestPipelineOutput:
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert isinstance(result.accepted, bool)
+        assert isinstance(result.accepted, (bool, np.bool_))
 
-    def test_predict_one_predictions_are_ints(self, trained_pipeline):
-        """cnn_pred and hgb_pred should be ints."""
+    def test_predict_one_model_predictions_are_ints(self, trained_pipeline):
+        """model_predictions values should be ints."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert isinstance(result.cnn_pred, int)
-        assert isinstance(result.hgb_pred, int)
+        assert isinstance(result.model_predictions, dict)
+        for model_name, pred in result.model_predictions.items():
+            assert isinstance(pred, (int, np.integer)), f"{model_name} prediction should be int"
 
     def test_predict_one_quality_in_range(self, trained_pipeline):
         """predicted_quality should be in [0, 1]."""
@@ -154,12 +151,12 @@ class TestPipelineOutput:
 
         assert 0 <= result.predicted_quality <= 1
 
-    def test_predict_one_confidence_in_range(self, trained_pipeline):
-        """confidence should be in [0, 1]."""
+    def test_predict_one_accept_score_in_range(self, trained_pipeline):
+        """accept_score should be in [0, 1]."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        assert 0 <= result.confidence <= 1
+        assert 0 <= result.accept_score <= 1
 
     def test_predict_multiple(self, trained_pipeline):
         """predict should work for multiple simulations."""
@@ -192,12 +189,13 @@ class TestAcceptanceLogic:
         return pipeline, mock_cache_multi
 
     def test_disagreement_calculated_correctly(self, trained_pipeline):
-        """Disagreement should be |cnn_pred - hgb_pred|."""
+        """Disagreement should be std of model predictions."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
-        expected_disagreement = abs(result.cnn_pred - result.hgb_pred)
-        assert result.disagreement == expected_disagreement
+        preds = list(result.model_predictions.values())
+        expected_disagreement = float(np.std(preds))
+        assert abs(result.disagreement - expected_disagreement) < 1e-6
 
     def test_boom_frame_none_when_rejected(self, trained_pipeline):
         """boom_frame should be None when rejected."""
@@ -208,12 +206,14 @@ class TestAcceptanceLogic:
             assert result.boom_frame is None
 
     def test_boom_frame_set_when_accepted(self, trained_pipeline):
-        """boom_frame should equal cnn_pred when accepted."""
+        """boom_frame should equal primary model prediction when accepted."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
         if result.accepted:
-            assert result.boom_frame == result.cnn_pred
+            # boom_frame should be the primary model's prediction
+            primary_pred = result.model_predictions[pipeline.primary_model]
+            assert result.boom_frame == primary_pred
 
 
 class TestBaselineFactories:

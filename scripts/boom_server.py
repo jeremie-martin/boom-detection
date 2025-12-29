@@ -229,20 +229,19 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
         # Calculate elapsed time
         elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-        # Build response
+        # Build response - simplified API: client mainly needs accepted + boom_frame
         response = {
             'status': 'ok',
             'accepted': bool(result.accepted),
             'boom_frame': int(result.boom_frame) if result.boom_frame is not None else None,
-            'cnn_pred': int(result.cnn_pred),
-            'hgb_pred': int(result.hgb_pred),
-            'disagreement': int(result.disagreement),
-            'predicted_quality': round(float(result.predicted_quality), 4),
             'accept_score': round(float(result.accept_score), 4),
+            'predicted_quality': round(float(result.predicted_quality), 4),
+            'disagreement': round(float(result.disagreement), 4),
+            'model_predictions': {k: int(v) for k, v in result.model_predictions.items()},
         }
 
         # Log response
-        details = f"quality={result.predicted_quality:.2f} agree={result.disagreement} score={result.accept_score:.2f}"
+        details = f"quality={result.predicted_quality:.2f} disagree={result.disagreement:.1f} score={result.accept_score:.2f}"
         log.response(result.accepted, response['boom_frame'], elapsed_ms, details)
 
         send_response(conn, response)

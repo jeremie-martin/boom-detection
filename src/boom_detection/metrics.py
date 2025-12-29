@@ -32,21 +32,17 @@ class SelectivePrediction:
     Attributes:
         boom_frame: Predicted boom frame (None if rejected)
         accepted: Whether the prediction was accepted
-        cnn_pred: CNN model prediction
-        hgb_pred: HistGBM model prediction
-        disagreement: Absolute difference between CNN and HGB predictions
+        accept_score: Combined confidence score (higher = more confident)
         predicted_quality: Predicted quality score (0-1)
-        accept_score: Single scalar combining all confidence signals (higher = more confident)
-        confidence: Deprecated, use accept_score instead
+        model_predictions: Dict of model_name -> predicted frame (e.g., {'cnn': 546, 'hgb': 542})
+        disagreement: Standard deviation of model predictions (0 = perfect agreement)
     """
     boom_frame: int | None  # None if rejected
     accepted: bool
-    cnn_pred: int
-    hgb_pred: int
-    disagreement: int
+    accept_score: float
     predicted_quality: float
-    accept_score: float | None = None  # Single scalar combining confidence signals
-    confidence: float | None = None  # Deprecated - use accept_score
+    model_predictions: dict[str, int]  # e.g., {'cnn': 546, 'hgb': 542, 'lstm': 548}
+    disagreement: float  # std of model predictions
 
     @classmethod
     def from_dict(cls, d: dict) -> 'SelectivePrediction':
@@ -54,29 +50,27 @@ class SelectivePrediction:
         return cls(
             boom_frame=d.get('boom_frame'),
             accepted=d['accepted'],
-            cnn_pred=d['cnn_pred'],
-            hgb_pred=d['hgb_pred'],
-            disagreement=d['disagreement'],
+            accept_score=d['accept_score'],
             predicted_quality=d['predicted_quality'],
-            accept_score=d.get('accept_score'),
-            confidence=d.get('confidence'),
+            model_predictions=d['model_predictions'],
+            disagreement=d['disagreement'],
         )
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
-        d = {
+        return {
             'boom_frame': self.boom_frame,
             'accepted': self.accepted,
-            'cnn_pred': self.cnn_pred,
-            'hgb_pred': self.hgb_pred,
-            'disagreement': self.disagreement,
+            'accept_score': self.accept_score,
             'predicted_quality': self.predicted_quality,
+            'model_predictions': self.model_predictions,
+            'disagreement': self.disagreement,
         }
-        if self.accept_score is not None:
-            d['accept_score'] = self.accept_score
-        if self.confidence is not None:
-            d['confidence'] = self.confidence
-        return d
+
+    @property
+    def primary_prediction(self) -> int:
+        """Get the primary model's prediction (first model in model_predictions)."""
+        return next(iter(self.model_predictions.values()))
 
 
 # =============================================================================
@@ -270,16 +264,14 @@ def compute_risk_coverage_curve(
     confidences = []
     errors = []
     for i, pred in enumerate(predictions):
-        # Get confidence score (prefer accept_score, fall back to others)
+        # Get confidence score (prefer accept_score, fall back to predicted_quality)
         if score_key == 'accept_score' and pred.accept_score is not None:
             conf = pred.accept_score
-        elif score_key == 'confidence' and pred.confidence is not None:
-            conf = pred.confidence
         else:
             conf = pred.predicted_quality
 
-        # Compute error (use CNN prediction as it's more accurate)
-        error = abs(pred.cnn_pred - true_booms[i])
+        # Compute error using primary model prediction
+        error = abs(pred.primary_prediction - true_booms[i])
 
         confidences.append(conf)
         errors.append(error)
@@ -382,7 +374,7 @@ def coverage_at_max_mae(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.cnn_pred - true_booms[i])
+        error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 
@@ -436,7 +428,7 @@ def min_mae_at_coverage(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.cnn_pred - true_booms[i])
+        error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 
@@ -488,7 +480,7 @@ def find_optimal_threshold(
             score = pred.accept_score
         else:
             score = pred.predicted_quality
-        error = abs(pred.cnn_pred - true_booms[i])
+        error = abs(pred.primary_prediction - true_booms[i])
         scores.append(score)
         errors.append(error)
 
