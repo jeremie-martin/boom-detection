@@ -280,7 +280,7 @@ def _make_pred(boom_frame, accepted, accept_score, predicted_quality, preds=None
         accept_score=accept_score,
         predicted_quality=predicted_quality,
         model_predictions=preds,
-        disagreement=float(np.std(list(preds.values()))) if len(preds) > 1 else 0.0,
+        disagreement=float(max(preds.values()) - min(preds.values())) if len(preds) > 1 else 0.0,
     )
 
 

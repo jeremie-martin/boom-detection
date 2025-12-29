@@ -13,24 +13,19 @@ This means:
 
 **Current best (90 simulations, 3-seed evaluation)**:
 
-*2-model pipeline (CNN + HGB):*
-- Selective (sqrt/5): MAE 4.9 ± 1.2 frames at 22% coverage
-- Balanced (sqrt/10): MAE 5.2 ± 1.2 frames at 37% coverage
-- Permissive (sqrt/15): MAE 6.4 ± 0.5 frames at 43% coverage
+*2-model pipeline (CNN + HGB) - recommended:*
+- Most selective (sqrt/5): MAE 3.4 ± 0.8 frames at 14% coverage
+- Balanced (sqrt/10): MAE 4.9 ± 1.2 frames at 22% coverage
+- Permissive (sqrt/15): MAE 4.9 ± 1.3 frames at 30% coverage
 
-*3-model pipeline (CNN + HGB + LSTM):*
-- Selective (sqrt/5): MAE 5.6 ± 1.9 frames at 12% coverage
-- Balanced (sqrt/12): MAE 5.2 ± 0.6 frames at 33% coverage
-- Permissive (sqrt/15): MAE 5.1 ± 0.6 frames at 37% coverage
-
-**Key finding**: The 3-model pipeline provides better accuracy at higher coverage levels. At ~37% coverage, 3-model achieves MAE 5.1 vs 2-model's 6.4 at 43%. For maximum selectivity, 2-model with scale=5 still provides the best MAE (4.9 at 22%).
+**Key finding**: The 2-model pipeline (CNN + HGB) remains the best option. 3-model experiments (adding LSTM) showed no improvement - the additional model increases disagreement without improving accuracy.
 
 **Key findings from comprehensive evaluation (Dec 2025)**:
 - HGB alone: MAE 22.5 ± 0.6 frames (37% within 5 frames)
 - LSTM alone: MAE 18.3 ± 1.6 frames (best individual model)
 - CNN alone: MAE 20.2 ± 1.5 frames
 - Caustic features do NOT improve the pipeline (no_caustic baseline is best)
-- 3-model agreement (std-based) provides more stable confidence estimates
+- 3-model (CNN+HGB+LSTM) does NOT outperform 2-model (additional model adds noise to agreement)
 
 **Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
@@ -44,17 +39,14 @@ The boom is the moment of chaotic divergence: when nearly-identical pendulums su
 ```python
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# 2-model pipeline (CNN + HGB) - default
+# Train pipeline with different selectivity levels:
+# - Most selective: agreement_scale=5 -> MAE 3.4 at 14% coverage
+# - Balanced: agreement_scale=10 -> MAE 4.9 at 22% coverage
+# - Permissive: agreement_scale=15 -> MAE 4.9 at 30% coverage
 pipeline = BoomDetectionPipeline(
-    frame_models=('cnn', 'hgb'),  # Default
-    agreement_scale=5.0,          # Selective: lower = more selective
-)
-
-# 3-model pipeline (CNN + HGB + LSTM) - better at higher coverage
-pipeline = BoomDetectionPipeline(
-    frame_models=('cnn', 'hgb', 'lstm'),
-    primary_model='cnn',          # Use CNN prediction when accepted
-    agreement_scale=15.0,         # Permissive: MAE 5.1 at 37% coverage
+    frame_models=('cnn', 'hgb'),  # Default: 2-model pipeline
+    agreement_formula='sqrt',      # 'linear' or 'sqrt'
+    agreement_scale=5.0,           # Lower = more selective
 )
 
 pipeline.fit(sim_ids, boom_frames, qualities, cache)
@@ -235,8 +227,8 @@ result = evaluate(dataset, cache)
 
 1. **Model agreement is the best confidence signal** - better than quality prediction alone
 2. **Use CNN for final prediction** - CNN is more accurate than HGB or average
-3. **3-model pipeline better at higher coverage** - MAE 5.1 at 37% vs 2-model's 6.4 at 43%
-4. **2-model with scale=5 best for selectivity** - MAE 4.9 at 22% coverage
+3. **2-model (CNN+HGB) is optimal** - 3-model adds noise without improving accuracy
+4. **scale=5 achieves MAE 3.4 at 14% coverage** - best accuracy when being selective
 5. **LSTM is the best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
 6. **Accept threshold 0.60 compensates for overconfidence** - ECE improved from 0.15 to 0.06
 7. **Caustic features do NOT improve the pipeline** - all tested formulas performed worse than no_caustic baseline

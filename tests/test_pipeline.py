@@ -189,12 +189,12 @@ class TestAcceptanceLogic:
         return pipeline, mock_cache_multi
 
     def test_disagreement_calculated_correctly(self, trained_pipeline):
-        """Disagreement should be std of model predictions."""
+        """Disagreement should be range (max-min) of model predictions."""
         pipeline, cache = trained_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
         preds = list(result.model_predictions.values())
-        expected_disagreement = float(np.std(preds))
+        expected_disagreement = float(max(preds) - min(preds))
         assert abs(result.disagreement - expected_disagreement) < 1e-6
 
     def test_boom_frame_none_when_rejected(self, trained_pipeline):
@@ -245,14 +245,14 @@ class TestThreeModelConfiguration:
         assert 'hgb' in result.model_predictions
         assert 'lstm' in result.model_predictions
 
-    def test_3model_disagreement_is_std(self, trained_3model_pipeline):
-        """Disagreement should be std of all 3 predictions."""
+    def test_3model_disagreement_is_range(self, trained_3model_pipeline):
+        """Disagreement should be range (max-min) of all 3 predictions."""
         pipeline, cache = trained_3model_pipeline
         result = pipeline.predict_one(cache["sim_0"])
 
         preds = list(result.model_predictions.values())
-        expected_std = float(np.std(preds))
-        assert abs(result.disagreement - expected_std) < 1e-6
+        expected_range = float(max(preds) - min(preds))
+        assert abs(result.disagreement - expected_range) < 1e-6
 
     def test_3model_primary_is_cnn(self, trained_3model_pipeline):
         """Primary model should be CNN when configured as primary."""

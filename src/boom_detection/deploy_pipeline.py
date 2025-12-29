@@ -300,10 +300,12 @@ class BoomDetectionPipeline:
         for model_name in self.frame_models:
             model_predictions[model_name] = self._predict_with_model(model_name, features)
 
-        # Compute disagreement as std of predictions (0 = perfect agreement)
+        # Compute disagreement as range of predictions (0 = perfect agreement)
+        # Using max-min is consistent with original 2-model abs(a-b) formula
+        # and generalizes naturally to N models
         pred_values = list(model_predictions.values())
         if len(pred_values) > 1:
-            disagreement = float(np.std(pred_values))
+            disagreement = float(max(pred_values) - min(pred_values))
         else:
             disagreement = 0.0
 
