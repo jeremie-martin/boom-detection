@@ -31,6 +31,7 @@ This means:
 - Caustic features do NOT improve the pipeline (no_caustic baseline is best)
 - 3-model (CNN+HGB+LSTM) does NOT outperform 2-model with PRODUCTION_CONFIG
 - QualityGatedCombiner(0.7) is surprisingly competitive with ThresholdCombiner
+- **Specialized models trained only on high-quality data perform WORSE** (see below)
 
 **Note**: Results using "oracle quality" (ground truth annotations) are NOT deployable. The above uses predicted quality, which is available at inference time.
 
@@ -287,6 +288,43 @@ result = evaluate(dataset, cache)
 
 **Target**: Scripts should stay under 5GB after releasing simulation data.
 
+## Reproducibility Requirements (CRITICAL)
+
+**All experiment results MUST be exactly reproducible.** Not "more or less" - EXACTLY identical.
+
+### Why This Matters
+- We use fixed seeds (42, 43, 44) for all experiments
+- Same parameters + same seeds = identical results every time
+- If results differ, something is seriously wrong and must be fixed
+
+### Mandatory Requirements
+
+1. **Always use PRODUCTION_CONFIG** for all experiments:
+   ```python
+   from boom_detection.features import PRODUCTION_CONFIG
+   cache = FeatureCache(PRODUCTION_CONFIG, cache_dir='.feature_cache/no_caustic')
+   ```
+
+2. **Use `.feature_cache/no_caustic` directory** - this ensures consistent feature extraction
+
+3. **Validate before reporting** - run `characterize_acceptance.py --validate` to confirm documented results still hold
+
+4. **If results don't match documented values**:
+   - STOP and investigate immediately
+   - Check feature config (PRODUCTION_CONFIG vs FeatureConfig())
+   - Check cache directory (`.feature_cache/no_caustic` vs `.feature_cache`)
+   - Check random seeds
+   - DO NOT proceed until root cause is found and fixed
+
+### What Went Wrong Before (Dec 2025)
+
+The 3-model MAE 3.27 result was obtained with `FeatureConfig()` (all pendulums) instead of `PRODUCTION_CONFIG` (max_pendulums=2000). This caused:
+- Irreproducible results between scripts
+- False claim that 3-model beats 2-model
+- Hours of debugging to find root cause
+
+**Lesson**: Always use PRODUCTION_CONFIG. Always verify reproducibility.
+
 ## Do
 
 - **Always use multi-seed evaluation** - report mean ± std, not single-seed results
@@ -394,10 +432,37 @@ pipeline = BoomDetectionPipeline(
 )
 ```
 
+### Specialized Model Experiment (Negative Result)
+
+**Hypothesis**: Models trained only on high-quality data (quality >= 0.70) would make more accurate predictions by avoiding learning from ambiguous booms.
+
+**Result**: The hypothesis is **NOT supported**. Specialized models perform WORSE than baselines.
+
+| Configuration | MAE | Coverage | Notes |
+|---------------|-----|----------|-------|
+| **baseline QualityGated(0.7)** | **3.35 ± 1.39** | 12.2% | **BEST** |
+| baseline ThresholdCombiner(scale=5) | 3.38 ± 0.83 | 13.7% | Close second |
+| specialized_hgb + QualityGated(0.7) | 3.73 ± 1.66 | 12.2% | WORSE |
+| specialized_lstm + QualityGated(0.7) | 3.84 ± 1.36 | 12.2% | WORSE |
+| specialized_cnn + QualityGated(0.7) | 6.54 ± 5.06 | 12.2% | Very poor |
+
+**Why specialized models don't help**:
+- Training on ALL data (including ambiguous cases) provides beneficial regularization
+- High-quality samples (~20-26 per fold) are too few for effective specialized training
+- Specialized CNN is particularly unstable with limited training data
+- The existing quality gating already ensures we only make predictions on high-quality simulations
+
+**Conclusion**: Don't use specialized models. Stick with the baseline approach of training on all data and using quality prediction for acceptance decisions.
+
+See `scripts/experiment_specialized_model.py` for detailed results.
+
+---
+
 See experiment scripts in `scripts/` for detailed results:
 - `scripts/characterize_acceptance.py` - Comprehensive formula sweeps
 - `scripts/experiment_combiner_ablations.py` - Combiner ablations (std vs range, baselines, weights)
 - `scripts/experiment_quality_gated_model.py` - **QualityGatedModelCombiner experiments** (NEW BEST)
 - `scripts/experiment_combined_best.py` - Combined best configuration testing
 - `scripts/experiment_3model_optimization.py` - 3-model parameter sweeps
+- `scripts/experiment_specialized_model.py` - **Specialized model experiment** (negative result)
 - `scripts/evaluate_lstm.py` - Individual model (CNN/HGB/LSTM) evaluation

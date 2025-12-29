@@ -69,6 +69,11 @@ class BoomDetectionPipeline:
     The default ThresholdCombiner uses model agreement + predicted quality.
 
     Supports N frame prediction models for agreement calculation.
+
+    Optional: Specialized prediction model trained only on high-quality data.
+    This model is used for final prediction, while regular models are used for
+    agreement calculation. The hypothesis is that a model trained only on
+    well-defined booms will make more accurate predictions.
     """
 
     def __init__(
@@ -80,6 +85,8 @@ class BoomDetectionPipeline:
         calibrate_quality: bool = True,
         frame_models: tuple[str, ...] = ('cnn', 'hgb'),
         feature_config: FeatureConfig | None = None,
+        specialized_model: str | None = None,
+        specialized_quality_threshold: float = 0.70,
     ):
         """
         Initialize boom detection pipeline.
@@ -93,6 +100,9 @@ class BoomDetectionPipeline:
             calibrate_quality: Calibrate quality predictions with isotonic regression
             frame_models: Which frame models to use ('cnn', 'hgb', 'lstm')
             feature_config: Feature extraction config (saved with model)
+            specialized_model: Optional model type ('hgb', 'cnn', 'lstm') to train
+                              only on high-quality data for final prediction
+            specialized_quality_threshold: Quality threshold for specialized model training
         """
         # Validate frame_models
         for model in frame_models:
@@ -118,6 +128,10 @@ class BoomDetectionPipeline:
         self.calibrate_quality = calibrate_quality
         self.frame_models = frame_models
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
+
+        # Specialized model settings
+        self.specialized_model = specialized_model
+        self.specialized_quality_threshold = specialized_quality_threshold
 
         # Trained models (set during fit)
         self.trained_models: dict[str, Any] = {}
@@ -173,6 +187,13 @@ class BoomDetectionPipeline:
         # Train quality predictor
         quality_seed = (self.seed + len(self.frame_models) * 1000) if self.seed is not None else 42
         self._train_quality_model(sim_ids, boom_frames, qualities, cache, quality_seed)
+
+        # Train specialized model if configured
+        if self.specialized_model is not None:
+            self._train_specialized_model(
+                sim_ids, boom_frames, qualities, cache,
+                (self.seed + 9000) if self.seed is not None else 42
+            )
 
         total_time = time.time() - fit_start
         logger.info("Pipeline training complete in {:.1f}s", total_time)
@@ -292,6 +313,86 @@ class BoomDetectionPipeline:
             self.quality_calibrator.fit(raw_predictions, qualities)
             logger.debug("Quality calibrator fitted")
 
+    def _train_specialized_model(self, sim_ids, boom_frames, qualities, cache, seed):
+        """
+        Train specialized model only on high-quality samples.
+
+        The hypothesis is that training only on well-defined booms
+        produces a more accurate model for final prediction.
+        """
+        # Filter to high-quality samples
+        hq_mask = qualities >= self.specialized_quality_threshold
+        hq_sim_ids = [sid for sid, is_hq in zip(sim_ids, hq_mask) if is_hq]
+        hq_booms = boom_frames[hq_mask]
+
+        n_hq = len(hq_sim_ids)
+        logger.info("Training specialized {} on {}/{} high-quality samples (threshold {})",
+                   self.specialized_model, n_hq, len(sim_ids), self.specialized_quality_threshold)
+
+        if n_hq < 5:
+            logger.warning("Too few high-quality samples ({}) for specialized model, skipping", n_hq)
+            return
+
+        model_type = self.specialized_model
+        specialized_key = 'specialized'
+
+        if model_type == 'cnn':
+            logger.debug("Training specialized CNN...")
+            start = time.time()
+            model = CNNClassifier(
+                n_features=self.n_features,
+                hidden_dim=64,
+                kernel_sizes=(5, 11, 21)
+            )
+            trainer = SequenceTrainer(
+                model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+                seed=seed,
+            )
+            trainer.fit(hq_sim_ids, hq_booms, cache)
+            self.trained_models[specialized_key] = model
+            self.trainers[specialized_key] = trainer
+            logger.debug("Specialized CNN trained in {:.1f}s", time.time() - start)
+
+        elif model_type == 'lstm':
+            logger.debug("Training specialized LSTM...")
+            start = time.time()
+            model = LSTMClassifier(
+                n_features=self.n_features,
+                hidden_dim=128,
+                n_layers=2,
+                dropout=0.3,
+            )
+            trainer = SequenceTrainer(
+                model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+                seed=seed,
+            )
+            trainer.fit(hq_sim_ids, hq_booms, cache)
+            self.trained_models[specialized_key] = model
+            self.trainers[specialized_key] = trainer
+            logger.debug("Specialized LSTM trained in {:.1f}s", time.time() - start)
+
+        elif model_type == 'hgb':
+            logger.debug("Training specialized HistGBM...")
+            start = time.time()
+
+            # Build frame-level training data from high-quality samples only
+            X_train, y_train = [], []
+            for sid, boom in zip(hq_sim_ids, hq_booms):
+                feats = cache[sid]
+                for t in range(len(feats)):
+                    X_train.append(feats[t])
+                    y_train.append(1 if t >= boom else 0)
+
+            model = HistGradientBoostingClassifier(
+                max_iter=200, max_depth=7, random_state=seed
+            )
+            model.fit(np.array(X_train), np.array(y_train))
+            self.trained_models[specialized_key] = model
+            logger.debug("Specialized HistGBM trained in {:.1f}s on {} frames",
+                        time.time() - start, len(X_train))
+        else:
+            raise ValueError(f"Unknown specialized model type: {model_type}")
+
     def predict_one(self, features: np.ndarray) -> SelectivePrediction:
         """
         Predict boom frame for a single simulation.
@@ -320,7 +421,7 @@ class BoomDetectionPipeline:
                 "Ensure feature extraction uses the same config as training."
             )
 
-        # Get predictions from all models
+        # Get predictions from all frame models (used for agreement calculation)
         model_preds = []
         model_predictions_dict = {}
         for model_name in self.frame_models:
@@ -328,14 +429,24 @@ class BoomDetectionPipeline:
             model_preds.append(ModelPrediction(model_name, frame))
             model_predictions_dict[model_name] = frame
 
-        # Predict quality (using median of predictions as boom estimate)
-        pred_values = [p.frame for p in model_preds]
-        median_pred = int(np.median(pred_values))
+        # Get specialized model prediction if available (separate from model_preds)
+        specialized_frame = None
+        if 'specialized' in self.trained_models:
+            specialized_frame = self._predict_with_model('specialized', features)
+            model_predictions_dict['specialized'] = specialized_frame
+
+        # Predict quality (using median of FRAME MODEL predictions only)
+        frame_preds = [p.frame for p in model_preds]
+        median_pred = int(np.median(frame_preds))
         predicted_quality = self._predict_quality(features, median_pred)
 
-        # Call combiner
+        # Call combiner with frame model predictions only (for agreement calculation)
         result = self.combiner(model_preds, predicted_quality, features)
         accepted = result is not None
+
+        # If accepted and we have a specialized model, use it for final prediction
+        if accepted and specialized_frame is not None:
+            result = specialized_frame
 
         # Get accept_score if available (for ThresholdCombiner)
         accept_score = 0.0
@@ -360,9 +471,33 @@ class BoomDetectionPipeline:
         """Get boom frame prediction from a specific model."""
         import torch
 
-        if model_name in ('cnn', 'lstm'):
+        # Check if model exists
+        if model_name not in self.trained_models:
+            raise ValueError(f"Model '{model_name}' not found in trained models")
+
+        model = self.trained_models[model_name]
+
+        # Handle specialized model by checking the model type
+        if model_name == 'specialized':
+            # Check if it's a PyTorch model (has trainer)
+            if model_name in self.trainers:
+                trainer = self.trainers[model_name]
+                model.eval()
+                with torch.no_grad():
+                    feats_t = torch.from_numpy(features.astype(np.float32)).unsqueeze(0)
+                    feats_t = feats_t.to(trainer.device)
+                    logits = model(feats_t)
+                    probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+                crossings = np.where(probs >= 0.5)[0]
+                return int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs))
+            else:
+                # It's an HGB model
+                probs = model.predict_proba(features)[:, 1]
+                crossings = np.where(probs >= 0.5)[0]
+                return int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs))
+
+        elif model_name in ('cnn', 'lstm'):
             # PyTorch sequence model
-            model = self.trained_models[model_name]
             trainer = self.trainers[model_name]
             model.eval()
             with torch.no_grad():
@@ -375,7 +510,6 @@ class BoomDetectionPipeline:
 
         elif model_name == 'hgb':
             # HistGradientBoosting model
-            model = self.trained_models['hgb']
             probs = model.predict_proba(features)[:, 1]
             crossings = np.where(probs >= 0.5)[0]
             return int(crossings[0]) if len(crossings) > 0 else int(np.argmax(probs))
