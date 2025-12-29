@@ -55,10 +55,12 @@ from .combine import (
     combiner_from_config,
     default_combiner,
     disagreement,
+    FrameModelConfig,
+    normalize_model_configs,
 )
 
-# Valid frame model names
-VALID_FRAME_MODELS = ('cnn', 'hgb', 'lstm')
+# Valid frame model types
+VALID_MODEL_TYPES = ('cnn', 'hgb', 'lstm')
 
 
 class BoomDetectionPipeline:
@@ -68,12 +70,24 @@ class BoomDetectionPipeline:
     Uses a Combiner to decide whether to accept predictions and produce final output.
     The default ThresholdCombiner uses model agreement + predicted quality.
 
-    Supports N frame prediction models for agreement calculation.
+    Supports N frame prediction models. Each model can be configured with a
+    quality_threshold for training data filtering:
+    - quality_threshold=0.0: Train on ALL data (regular model)
+    - quality_threshold>0.0: Train only on samples with quality >= threshold (specialized)
 
-    Optional: Specialized prediction model trained only on high-quality data.
-    This model is used for final prediction, while regular models are used for
-    agreement calculation. The hypothesis is that a model trained only on
-    well-defined booms will make more accurate predictions.
+    Example configurations:
+        # 2-model (regular CNN + HGB)
+        BoomDetectionPipeline(frame_models=('cnn', 'hgb'))
+
+        # 3-model with LSTM
+        BoomDetectionPipeline(frame_models=('cnn', 'hgb', 'lstm'))
+
+        # Specialized HGB trained on high-quality data only
+        BoomDetectionPipeline(frame_models=(
+            'cnn',
+            'hgb',
+            FrameModelConfig('hgb', 0.5),  # hgb_0.5: trained on quality >= 0.5
+        ))
     """
 
     def __init__(
@@ -83,11 +97,8 @@ class BoomDetectionPipeline:
         n_quality_features: int = 50,
         seed: int | None = None,
         calibrate_quality: bool = True,
-        frame_models: tuple[str, ...] = ('cnn', 'hgb'),
+        frame_models: tuple[str | FrameModelConfig, ...] = ('cnn', 'hgb'),
         feature_config: FeatureConfig | None = None,
-        specialized_model: str | None = None,
-        specialized_quality_threshold: float = 0.70,
-        specialized_configs: dict[str, tuple[str, float]] | None = None,
     ):
         """
         Initialize boom detection pipeline.
@@ -99,55 +110,53 @@ class BoomDetectionPipeline:
             n_quality_features: Top correlated features for quality prediction
             seed: Random seed for reproducibility
             calibrate_quality: Calibrate quality predictions with isotonic regression
-            frame_models: Which frame models to use ('cnn', 'hgb', 'lstm')
+            frame_models: Which frame models to use. Can be strings ('cnn', 'hgb', 'lstm')
+                         or FrameModelConfig instances for specialized models.
+                         Examples:
+                           ('cnn', 'hgb')  # Regular 2-model
+                           ('cnn', 'hgb', 'lstm')  # Regular 3-model
+                           ('cnn', 'hgb', FrameModelConfig('hgb', 0.5))  # With specialized
+                           ('cnn', 'hgb_0.5')  # String shorthand for specialized
             feature_config: Feature extraction config (saved with model)
-            specialized_model: Optional model type ('hgb', 'cnn', 'lstm') to train
-                              only on high-quality data for final prediction (single model)
-            specialized_quality_threshold: Quality threshold for specialized model training
-            specialized_configs: Dict of multiple specialized models to train.
-                               Format: {key: (model_type, quality_threshold)}
-                               Example: {'hgb_0.4': ('hgb', 0.4), 'cnn_0.5': ('cnn', 0.5)}
-                               If provided, overrides specialized_model/specialized_quality_threshold.
         """
-        # Validate frame_models
-        for model in frame_models:
-            if model not in VALID_FRAME_MODELS:
-                raise ValueError(f"Invalid frame model: {model}. Must be one of {VALID_FRAME_MODELS}")
+        # Normalize frame_models to FrameModelConfig instances
+        self.model_configs = normalize_model_configs(frame_models)
+
+        # Validate model types
+        for config in self.model_configs:
+            if config.model_type not in VALID_MODEL_TYPES:
+                raise ValueError(
+                    f"Invalid model type: {config.model_type}. "
+                    f"Must be one of {VALID_MODEL_TYPES}"
+                )
 
         # Set up combiner
         if combiner is None:
             combiner = default_combiner()
         self.combiner = combiner
 
-        # Validate that primary_model (if ThresholdCombiner) is in frame_models
+        # Validate that primary_model (if ThresholdCombiner) matches a model config
         if isinstance(combiner, ThresholdCombiner):
-            if combiner.primary_model not in frame_models:
+            # Check if primary_model matches any model's type (for regular models)
+            # or key (for specialized models)
+            model_keys = {cfg.key for cfg in self.model_configs}
+            model_types = {cfg.model_type for cfg in self.model_configs}
+            if combiner.primary_model not in model_keys and combiner.primary_model not in model_types:
                 raise ValueError(
                     f"Combiner's primary_model '{combiner.primary_model}' "
-                    f"must be in frame_models {frame_models}"
+                    f"must match a model in frame_models. Available: {model_keys}"
                 )
 
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
         self.seed = seed
         self.calibrate_quality = calibrate_quality
-        self.frame_models = frame_models
+        # Keep frame_models as tuple of strings for backward compatibility
+        self.frame_models = tuple(cfg.key for cfg in self.model_configs)
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
 
-        # Specialized model settings
-        # If specialized_configs is provided, use it; otherwise use single model config
-        if specialized_configs is not None:
-            self.specialized_configs = specialized_configs
-        elif specialized_model is not None:
-            # Convert single model to configs format for uniform handling
-            self.specialized_configs = {'specialized': (specialized_model, specialized_quality_threshold)}
-        else:
-            self.specialized_configs = None
-        # Keep for backward compatibility
-        self.specialized_model = specialized_model
-        self.specialized_quality_threshold = specialized_quality_threshold
-
         # Trained models (set during fit)
+        # Key is the model's unique key (e.g., 'cnn', 'hgb', 'hgb_0.5')
         self.trained_models: dict[str, Any] = {}
         self.trainers: dict[str, SequenceTrainer] = {}
         self.quality_model = None
@@ -186,37 +195,50 @@ class BoomDetectionPipeline:
         # Get feature count
         self.n_features = cache[sim_ids[0]].shape[1]
 
-        # Train each frame model
-        for i, model_name in enumerate(self.frame_models):
+        # Train each frame model (unified handling for regular and specialized)
+        for i, config in enumerate(self.model_configs):
             # Derive deterministic seed for this model
             model_seed = (self.seed + i * 1000) if self.seed is not None else 42
 
-            if model_name == 'cnn':
-                self._train_cnn(sim_ids, boom_frames, cache, model_seed)
-            elif model_name == 'hgb':
-                self._train_hgb(sim_ids, boom_frames, cache, model_seed)
-            elif model_name == 'lstm':
-                self._train_lstm(sim_ids, boom_frames, cache, model_seed)
+            # Filter training data by quality threshold
+            if config.quality_threshold > 0.0:
+                # Specialized model: filter to high-quality samples
+                mask = qualities >= config.quality_threshold
+                train_sim_ids = [sid for sid, m in zip(sim_ids, mask) if m]
+                train_booms = boom_frames[mask]
+
+                n_samples = len(train_sim_ids)
+                logger.info("Training {} '{}' on {}/{} samples (quality >= {})",
+                           config.model_type, config.key, n_samples, len(sim_ids),
+                           config.quality_threshold)
+
+                if n_samples < 5:
+                    logger.warning("Too few samples ({}) for model '{}', skipping",
+                                  n_samples, config.key)
+                    continue
+            else:
+                # Regular model: train on all data
+                train_sim_ids = sim_ids
+                train_booms = boom_frames
+
+            # Train the model based on type
+            if config.model_type == 'cnn':
+                self._train_cnn(config.key, train_sim_ids, train_booms, cache, model_seed)
+            elif config.model_type == 'hgb':
+                self._train_hgb(config.key, train_sim_ids, train_booms, cache, model_seed)
+            elif config.model_type == 'lstm':
+                self._train_lstm(config.key, train_sim_ids, train_booms, cache, model_seed)
 
         # Train quality predictor
-        quality_seed = (self.seed + len(self.frame_models) * 1000) if self.seed is not None else 42
+        quality_seed = (self.seed + len(self.model_configs) * 1000) if self.seed is not None else 42
         self._train_quality_model(sim_ids, boom_frames, qualities, cache, quality_seed)
-
-        # Train specialized models if configured
-        if self.specialized_configs is not None:
-            for i, (key, (model_type, quality_thresh)) in enumerate(self.specialized_configs.items()):
-                spec_seed = (self.seed + 9000 + i * 100) if self.seed is not None else 42
-                self._train_specialized_model_config(
-                    key, model_type, quality_thresh,
-                    sim_ids, boom_frames, qualities, cache, spec_seed
-                )
 
         total_time = time.time() - fit_start
         logger.info("Pipeline training complete in {:.1f}s", total_time)
 
-    def _train_cnn(self, sim_ids, boom_frames, cache, seed):
+    def _train_cnn(self, model_key: str, sim_ids, boom_frames, cache, seed):
         """Train CNN model."""
-        logger.debug("Training CNN...")
+        logger.debug("Training CNN '{}'...", model_key)
         start = time.time()
         model = CNNClassifier(
             n_features=self.n_features,
@@ -228,13 +250,13 @@ class BoomDetectionPipeline:
             seed=seed,
         )
         trainer.fit(sim_ids, boom_frames, cache)
-        self.trained_models['cnn'] = model
-        self.trainers['cnn'] = trainer
-        logger.debug("CNN trained in {:.1f}s", time.time() - start)
+        self.trained_models[model_key] = model
+        self.trainers[model_key] = trainer
+        logger.debug("CNN '{}' trained in {:.1f}s", model_key, time.time() - start)
 
-    def _train_lstm(self, sim_ids, boom_frames, cache, seed):
+    def _train_lstm(self, model_key: str, sim_ids, boom_frames, cache, seed):
         """Train LSTM model."""
-        logger.debug("Training LSTM...")
+        logger.debug("Training LSTM '{}'...", model_key)
         start = time.time()
         model = LSTMClassifier(
             n_features=self.n_features,
@@ -247,13 +269,13 @@ class BoomDetectionPipeline:
             seed=seed,
         )
         trainer.fit(sim_ids, boom_frames, cache)
-        self.trained_models['lstm'] = model
-        self.trainers['lstm'] = trainer
-        logger.debug("LSTM trained in {:.1f}s", time.time() - start)
+        self.trained_models[model_key] = model
+        self.trainers[model_key] = trainer
+        logger.debug("LSTM '{}' trained in {:.1f}s", model_key, time.time() - start)
 
-    def _train_hgb(self, sim_ids, boom_frames, cache, seed):
+    def _train_hgb(self, model_key: str, sim_ids, boom_frames, cache, seed):
         """Train HistGradientBoosting model."""
-        logger.debug("Training HistGBM...")
+        logger.debug("Training HistGBM '{}'...", model_key)
         start = time.time()
 
         # Build frame-level training data
@@ -268,8 +290,8 @@ class BoomDetectionPipeline:
             max_iter=200, max_depth=7, random_state=seed
         )
         model.fit(np.array(X_train), np.array(y_train))
-        self.trained_models['hgb'] = model
-        logger.debug("HistGBM trained in {:.1f}s on {} frames", time.time() - start, len(X_train))
+        self.trained_models[model_key] = model
+        logger.debug("HistGBM '{}' trained in {:.1f}s on {} frames", model_key, time.time() - start, len(X_train))
 
     def _train_quality_model(self, sim_ids, boom_frames, qualities, cache, seed):
         """Train quality prediction model."""
@@ -329,93 +351,6 @@ class BoomDetectionPipeline:
             self.quality_calibrator.fit(raw_predictions, qualities)
             logger.debug("Quality calibrator fitted")
 
-    def _train_specialized_model_config(
-        self, key: str, model_type: str, quality_thresh: float,
-        sim_ids, boom_frames, qualities, cache, seed
-    ):
-        """
-        Train a specialized model only on samples above quality threshold.
-
-        Args:
-            key: Key to store the model under (e.g., 'hgb_0.4', 'specialized')
-            model_type: Model type ('hgb', 'cnn', 'lstm')
-            quality_thresh: Quality threshold for filtering training data
-            sim_ids: All simulation IDs
-            boom_frames: All boom frames
-            qualities: All quality scores
-            cache: Feature cache
-            seed: Random seed
-        """
-        # Filter to samples above quality threshold
-        hq_mask = qualities >= quality_thresh
-        hq_sim_ids = [sid for sid, is_hq in zip(sim_ids, hq_mask) if is_hq]
-        hq_booms = boom_frames[hq_mask]
-
-        n_hq = len(hq_sim_ids)
-        logger.info("Training specialized {} '{}' on {}/{} samples (quality >= {})",
-                   model_type, key, n_hq, len(sim_ids), quality_thresh)
-
-        if n_hq < 5:
-            logger.warning("Too few samples ({}) for specialized model '{}', skipping", n_hq, key)
-            return
-
-        if model_type == 'cnn':
-            logger.debug("Training specialized CNN...")
-            start = time.time()
-            model = CNNClassifier(
-                n_features=self.n_features,
-                hidden_dim=64,
-                kernel_sizes=(5, 11, 21)
-            )
-            trainer = SequenceTrainer(
-                model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
-                seed=seed,
-            )
-            trainer.fit(hq_sim_ids, hq_booms, cache)
-            self.trained_models[key] = model
-            self.trainers[key] = trainer
-            logger.debug("Specialized CNN '{}' trained in {:.1f}s", key, time.time() - start)
-
-        elif model_type == 'lstm':
-            logger.debug("Training specialized LSTM '{}'...", key)
-            start = time.time()
-            model = LSTMClassifier(
-                n_features=self.n_features,
-                hidden_dim=128,
-                n_layers=2,
-                dropout=0.3,
-            )
-            trainer = SequenceTrainer(
-                model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
-                seed=seed,
-            )
-            trainer.fit(hq_sim_ids, hq_booms, cache)
-            self.trained_models[key] = model
-            self.trainers[key] = trainer
-            logger.debug("Specialized LSTM '{}' trained in {:.1f}s", key, time.time() - start)
-
-        elif model_type == 'hgb':
-            logger.debug("Training specialized HistGBM '{}'...", key)
-            start = time.time()
-
-            # Build frame-level training data from filtered samples only
-            X_train, y_train = [], []
-            for sid, boom in zip(hq_sim_ids, hq_booms):
-                feats = cache[sid]
-                for t in range(len(feats)):
-                    X_train.append(feats[t])
-                    y_train.append(1 if t >= boom else 0)
-
-            model = HistGradientBoostingClassifier(
-                max_iter=200, max_depth=7, random_state=seed
-            )
-            model.fit(np.array(X_train), np.array(y_train))
-            self.trained_models[key] = model
-            logger.debug("Specialized HistGBM '{}' trained in {:.1f}s on {} frames",
-                        key, time.time() - start, len(X_train))
-        else:
-            raise ValueError(f"Unknown specialized model type: {model_type}")
-
     def predict_one(self, features: np.ndarray) -> SelectivePrediction:
         """
         Predict boom frame for a single simulation.
@@ -444,41 +379,25 @@ class BoomDetectionPipeline:
                 "Ensure feature extraction uses the same config as training."
             )
 
-        # Get predictions from all frame models (used for agreement calculation)
+        # Get predictions from all models (unified handling)
         model_preds = []
         model_predictions_dict = {}
-        for model_name in self.frame_models:
-            frame = self._predict_with_model(model_name, features)
-            model_preds.append(ModelPrediction(model_name, frame))
-            model_predictions_dict[model_name] = frame
+        for model_key in self.frame_models:
+            if model_key not in self.trained_models:
+                # Model was skipped during training (e.g., too few samples)
+                continue
+            frame = self._predict_with_model(model_key, features)
+            model_preds.append(ModelPrediction(model_key, frame))
+            model_predictions_dict[model_key] = frame
 
-        # Get predictions from all specialized models (separate from model_preds for agreement)
-        specialized_predictions = {}
-        if self.specialized_configs is not None:
-            for key in self.specialized_configs.keys():
-                if key in self.trained_models:
-                    frame = self._predict_with_model(key, features)
-                    specialized_predictions[key] = frame
-                    model_predictions_dict[key] = frame
-
-        # Predict quality (using median of FRAME MODEL predictions only)
+        # Predict quality (using median of all model predictions)
         frame_preds = [p.frame for p in model_preds]
         median_pred = int(np.median(frame_preds))
         predicted_quality = self._predict_quality(features, median_pred)
 
-        # Call combiner with frame model predictions only (for agreement calculation)
-        # Pass specialized_predictions as part of features for combiners that need them
+        # Call combiner with all model predictions
         result = self.combiner(model_preds, predicted_quality, features)
         accepted = result is not None
-
-        # If accepted and combiner specifies a specialized model, use it
-        # Check if combiner has a specialized_model attribute
-        selected_specialized = getattr(self.combiner, 'specialized_model', None)
-        if accepted and selected_specialized and selected_specialized in specialized_predictions:
-            result = specialized_predictions[selected_specialized]
-        # Backward compatibility: if 'specialized' exists, use it
-        elif accepted and 'specialized' in specialized_predictions:
-            result = specialized_predictions['specialized']
 
         # Get accept_score if available (for ThresholdCombiner)
         accept_score = 0.0
@@ -551,6 +470,8 @@ class BoomDetectionPipeline:
 
         Creates model files for each frame model (cnn.pt, lstm.pt, hgb.joblib, etc.)
         plus quality.joblib, config.json, and feature_config.json.
+
+        Model files are named by their key (e.g., 'cnn.pt', 'hgb_0.5.joblib').
         """
         import torch
         import joblib
@@ -562,23 +483,30 @@ class BoomDetectionPipeline:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # Save each frame model
-        for model_name in self.frame_models:
-            model = self.trained_models[model_name]
-            if model_name in ('cnn', 'lstm'):
+        # Save each frame model using its config
+        for config in self.model_configs:
+            model_key = config.key
+            if model_key not in self.trained_models:
+                # Model was skipped during training
+                continue
+
+            model = self.trained_models[model_key]
+
+            if config.model_type in ('cnn', 'lstm'):
                 # PyTorch models - save with architecture params
                 torch.save({
                     'state_dict': model.state_dict(),
                     'n_features': model.n_features,
                     'hidden_dim': model.hidden_dim,
-                    'model_type': model_name,
+                    'model_type': config.model_type,
+                    'model_key': model_key,
                     # Model-specific params
                     **({'kernel_sizes': model.kernel_sizes, 'dropout': model.dropout}
-                       if model_name == 'cnn' else
+                       if config.model_type == 'cnn' else
                        {'n_layers': model.n_layers, 'dropout': model.dropout}),
-                }, path / f'{model_name}.pt')
-            elif model_name == 'hgb':
-                joblib.dump(model, path / 'hgb.joblib')
+                }, path / f'{model_key}.pt')
+            elif config.model_type == 'hgb':
+                joblib.dump(model, path / f'{model_key}.joblib')
 
         # Save quality model
         joblib.dump(self.quality_model, path / 'quality.joblib')
@@ -592,8 +520,15 @@ class BoomDetectionPipeline:
                 "Use a combiner from boom_detection.combine that supports to_config()."
             )
 
+        # Serialize model configs for loading
+        model_configs_serialized = [
+            {'model_type': cfg.model_type, 'quality_threshold': cfg.quality_threshold}
+            for cfg in self.model_configs
+        ]
+
         config = {
-            'frame_models': list(self.frame_models),
+            'frame_models': list(self.frame_models),  # For backward compat (list of keys)
+            'model_configs': model_configs_serialized,  # Full config for loading
             'combiner': combiner_to_config(self.combiner),
             'quality_window': self.quality_window,
             'n_quality_features': self.n_quality_features,
@@ -640,8 +575,16 @@ class BoomDetectionPipeline:
                 feature_config_dict = json.load(f)
                 feature_config = FeatureConfig(**feature_config_dict)
 
-        # Get frame models from config
-        frame_models = tuple(config['frame_models'])
+        # Reconstruct model configs
+        # New format has 'model_configs', old format only has 'frame_models' (strings)
+        if 'model_configs' in config:
+            model_configs = tuple(
+                FrameModelConfig(cfg['model_type'], cfg['quality_threshold'])
+                for cfg in config['model_configs']
+            )
+        else:
+            # Backward compat: parse from frame_models strings
+            model_configs = normalize_model_configs(config['frame_models'])
 
         # Load combiner config
         combiner = combiner_from_config(config['combiner'])
@@ -652,7 +595,7 @@ class BoomDetectionPipeline:
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
-            frame_models=frame_models,
+            frame_models=model_configs,
             feature_config=feature_config,
         )
 
@@ -663,11 +606,19 @@ class BoomDetectionPipeline:
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # Load each frame model
-        for model_name in frame_models:
-            if model_name in ('cnn', 'lstm'):
-                checkpoint = torch.load(path / f'{model_name}.pt', map_location='cpu', weights_only=True)
-                if model_name == 'cnn':
+        # Load each frame model using its config
+        for cfg in model_configs:
+            model_key = cfg.key
+            model_type = cfg.model_type
+
+            if model_type in ('cnn', 'lstm'):
+                model_path = path / f'{model_key}.pt'
+                if not model_path.exists():
+                    logger.warning("Model file {} not found, skipping", model_path)
+                    continue
+
+                checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+                if model_type == 'cnn':
                     model = CNNClassifier(
                         n_features=checkpoint['n_features'],
                         hidden_dim=checkpoint['hidden_dim'],
@@ -684,11 +635,15 @@ class BoomDetectionPipeline:
                 model.load_state_dict(checkpoint['state_dict'])
                 model = model.to(device)
                 model.eval()
-                pipeline.trained_models[model_name] = model
-                pipeline.trainers[model_name] = SequenceTrainer(model, device=device)
+                pipeline.trained_models[model_key] = model
+                pipeline.trainers[model_key] = SequenceTrainer(model, device=device)
 
-            elif model_name == 'hgb':
-                pipeline.trained_models['hgb'] = joblib.load(path / 'hgb.joblib')
+            elif model_type == 'hgb':
+                model_path = path / f'{model_key}.joblib'
+                if not model_path.exists():
+                    logger.warning("Model file {} not found, skipping", model_path)
+                    continue
+                pipeline.trained_models[model_key] = joblib.load(model_path)
 
         # Load quality model
         pipeline.quality_model = joblib.load(path / 'quality.joblib')

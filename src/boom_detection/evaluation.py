@@ -333,6 +333,11 @@ class MultiSeedSelectiveResult:
             lines.append(f"  95% CI: [{self.ci_lower.get('selective_mae', mae_val):.2f}, "
                         f"{self.ci_upper.get('selective_mae', mae_val):.2f}]")
 
+        if 'selective_rmse' in self.mean_metrics:
+            rmse_val = self.mean_metrics['selective_rmse']
+            rmse_std = self.std_metrics.get('selective_rmse', 0)
+            lines.append(f"Selective RMSE: {rmse_val:.2f} +/- {rmse_std:.2f}")
+
         if 'coverage' in self.mean_metrics:
             cov = self.mean_metrics['coverage']
             cov_std = self.std_metrics.get('coverage', 0)
@@ -889,9 +894,12 @@ class CachedEvaluator:
             print('='*60)
             mae_val = result.mean_metrics.get('selective_mae', float('nan'))
             mae_std = result.std_metrics.get('selective_mae', 0)
+            rmse_val = result.mean_metrics.get('selective_rmse', float('nan'))
+            rmse_std = result.std_metrics.get('selective_rmse', 0)
             cov = result.mean_metrics.get('coverage', 0)
             cov_std = result.std_metrics.get('coverage', 0)
             print(f"Selective MAE: {mae_val:.2f} +/- {mae_std:.2f}")
+            print(f"Selective RMSE: {rmse_val:.2f} +/- {rmse_std:.2f}")
             print(f"Coverage: {cov:.1%} +/- {cov_std:.1%}")
 
         return result

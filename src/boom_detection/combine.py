@@ -33,6 +33,112 @@ import numpy as np
 # Core Types
 # =============================================================================
 
+@dataclass(frozen=True)
+class FrameModelConfig:
+    """
+    Configuration for a frame-level model.
+
+    Every model can have a quality threshold that filters training data.
+    - quality_threshold=0.0: Train on ALL data (no filtering) - "regular" model
+    - quality_threshold>0.0: Train only on samples with quality >= threshold - "specialized"
+
+    This unifies the concept of "specialized" and "regular" models:
+    a specialized model is simply a model trained on higher-quality data.
+
+    Note: The quality threshold uses GROUND TRUTH quality during training
+    (from annotations), not predicted quality. This is not "cheating" because
+    we're just selecting which training samples to use.
+
+    Examples:
+        FrameModelConfig('hgb')           # Regular HGB, trained on all data
+        FrameModelConfig('hgb', 0.5)      # Specialized HGB, trained on quality >= 0.5
+        FrameModelConfig('cnn', 0.7)      # Specialized CNN, trained on quality >= 0.7
+    """
+    model_type: str  # 'cnn', 'hgb', 'lstm'
+    quality_threshold: float = 0.0
+
+    def __post_init__(self):
+        if self.quality_threshold < 0.0 or self.quality_threshold > 1.0:
+            raise ValueError(f"quality_threshold must be in [0, 1], got {self.quality_threshold}")
+
+    @property
+    def key(self) -> str:
+        """
+        Unique identifier for this model configuration.
+
+        Returns:
+            'hgb' for regular models, 'hgb_0.5' for specialized models
+        """
+        if self.quality_threshold == 0.0:
+            return self.model_type
+        return f"{self.model_type}_{self.quality_threshold}"
+
+    @property
+    def is_specialized(self) -> bool:
+        """Whether this model is trained on filtered (high-quality) data."""
+        return self.quality_threshold > 0.0
+
+    @classmethod
+    def from_spec(cls, spec: 'str | FrameModelConfig') -> 'FrameModelConfig':
+        """
+        Create from string or FrameModelConfig (for backward compatibility).
+
+        Args:
+            spec: Either a string like 'cnn', 'hgb_0.5' or a FrameModelConfig
+
+        Returns:
+            FrameModelConfig instance
+
+        Examples:
+            FrameModelConfig.from_spec('cnn')      # FrameModelConfig('cnn', 0.0)
+            FrameModelConfig.from_spec('hgb_0.5')  # FrameModelConfig('hgb', 0.5)
+        """
+        if isinstance(spec, FrameModelConfig):
+            return spec
+
+        # Parse string like 'hgb' or 'hgb_0.5'
+        if '_' in spec:
+            parts = spec.rsplit('_', 1)
+            try:
+                threshold = float(parts[1])
+                return cls(parts[0], threshold)
+            except ValueError:
+                # Not a number after underscore, treat whole string as model type
+                pass
+
+        return cls(spec, 0.0)
+
+    def __str__(self) -> str:
+        return self.key
+
+    def __repr__(self) -> str:
+        if self.quality_threshold == 0.0:
+            return f"FrameModelConfig('{self.model_type}')"
+        return f"FrameModelConfig('{self.model_type}', {self.quality_threshold})"
+
+
+def normalize_model_configs(
+    specs: 'tuple[str | FrameModelConfig, ...] | list[str | FrameModelConfig]'
+) -> tuple[FrameModelConfig, ...]:
+    """
+    Normalize a sequence of model specs to FrameModelConfig instances.
+
+    Args:
+        specs: Tuple/list of strings or FrameModelConfig instances
+
+    Returns:
+        Tuple of FrameModelConfig instances
+
+    Examples:
+        normalize_model_configs(('cnn', 'hgb'))
+        # -> (FrameModelConfig('cnn'), FrameModelConfig('hgb'))
+
+        normalize_model_configs(('cnn', 'hgb_0.5'))
+        # -> (FrameModelConfig('cnn'), FrameModelConfig('hgb', 0.5))
+    """
+    return tuple(FrameModelConfig.from_spec(s) for s in specs)
+
+
 @dataclass
 class ModelPrediction:
     """One model's prediction output."""

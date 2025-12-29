@@ -12,11 +12,21 @@ Usage:
 
 Configure log level via environment variable:
     BOOM_LOG_LEVEL=DEBUG uv run python ...
+
+For experiment scripts with archival:
+    from boom_detection.logging_config import logger, setup_run_logging
+
+    run_dir = setup_run_logging("sweep_2model")
+    logger.info("Results will be saved to {}", run_dir)
+    # All logger output now goes to both terminal AND run_dir/run.log
 """
 from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
+
 from loguru import logger
 
 # Remove default handler
@@ -56,5 +66,49 @@ def log_memory_usage(label: str = "") -> float:
     return mem_gb
 
 
+def setup_run_logging(run_name: str, base_dir: Path | str = Path("runs")) -> Path:
+    """
+    Setup logging for an experiment run with timestamped directory.
+
+    Creates: {base_dir}/{run_name}_{YYYYMMDD_HHMMSS}/
+    Returns: Path to run directory
+
+    Configures loguru to output to both terminal AND log file.
+    The log file captures the same information as terminal output,
+    providing automatic archival of experiment runs.
+
+    Args:
+        run_name: Name of the experiment (e.g., "sweep_2model")
+        base_dir: Base directory for runs (default: "runs")
+
+    Returns:
+        Path to the created run directory
+
+    Example:
+        run_dir = setup_run_logging("sweep_quality")
+        logger.info("Starting sweep...")
+        # ... run experiment ...
+        # Results saved to runs/sweep_quality_20251229_143022/
+    """
+    base_dir = Path(base_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = base_dir / f"{run_name}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Add file handler to loguru (in addition to existing stderr handler)
+    log_file = run_dir / "run.log"
+    logger.add(
+        log_file,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+        level="INFO",
+    )
+
+    logger.info("=" * 70)
+    logger.info(f"Run directory: {run_dir}")
+    logger.info("=" * 70)
+
+    return run_dir
+
+
 # Export logger for use in other modules
-__all__ = ["logger", "log_memory_usage"]
+__all__ = ["logger", "log_memory_usage", "setup_run_logging"]

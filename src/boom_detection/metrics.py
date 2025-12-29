@@ -170,7 +170,7 @@ def compute_selective_metrics(
     Returns:
         Dictionary with selective metrics including:
         - n_total, n_accepted, coverage: Basic counts
-        - selective_mae, selective_median_ae, selective_max_ae: Error metrics
+        - selective_mae, selective_rmse, selective_median_ae, selective_max_ae: Error metrics
         - selective_within_5, selective_within_10: Accuracy at thresholds
         - aurc: Area Under Risk-Coverage curve (lower is better)
         - optimal_coverage: Coverage at minimum risk-coverage product
@@ -195,6 +195,7 @@ def compute_selective_metrics(
         ])
 
         metrics['selective_mae'] = float(np.mean(errors))
+        metrics['selective_rmse'] = float(np.sqrt(np.mean(errors**2)))
         metrics['selective_median_ae'] = float(np.median(errors))
         metrics['selective_max_ae'] = float(np.max(errors))
         metrics['selective_within_5'] = float(np.mean(errors <= 5))
@@ -208,6 +209,7 @@ def compute_selective_metrics(
     else:
         # No accepted predictions
         metrics['selective_mae'] = float('nan')
+        metrics['selective_rmse'] = float('nan')
         metrics['selective_median_ae'] = float('nan')
         metrics['selective_max_ae'] = float('nan')
         metrics['selective_within_5'] = float('nan')
