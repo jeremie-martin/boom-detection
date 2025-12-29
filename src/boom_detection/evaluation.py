@@ -412,14 +412,19 @@ class FormulaExperiment:
             seeds=[42, 43, 44],
         )
 
-        # Now iterate on formulas instantly:
+        # Now iterate on formulas instantly using new acceptance API:
         for scale in [3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]:
             result = experiment.evaluate(
-                agreement_formula='sqrt',
-                agreement_scale=scale,
-                accept_threshold=0.60,
+                acceptance_formula='sqrt',
+                acceptance_params={'scale': scale, 'threshold': 0.60},
             )
             print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
+
+        # Or use sweep with param_grid:
+        results = experiment.sweep(
+            formulas=['sqrt', 'linear'],
+            param_grid={'scale': range(3, 21), 'threshold': [0.55, 0.60, 0.65]},
+        )
     """
 
     def __init__(
@@ -445,11 +450,9 @@ class FormulaExperiment:
 
     def evaluate(
         self,
-        agreement_formula: str = 'sqrt',
-        agreement_scale: float = 15.0,
-        agreement_weight: float = 0.4,
-        quality_weight: float = 0.6,
-        accept_threshold: float = 0.60,
+        acceptance_formula: str = 'sqrt',
+        acceptance_params: dict | None = None,
+        custom_acceptance_fn: 'AcceptanceFunction | None' = None,
         verbose: bool = False,
     ) -> MultiSeedSelectiveResult:
         """
@@ -458,15 +461,22 @@ class FormulaExperiment:
         This is FAST - no model training or inference, just formula evaluation.
 
         Args:
-            agreement_formula: 'sqrt' or 'linear'
-            agreement_scale: Scale for agreement (higher = more permissive)
-            agreement_weight: Weight for agreement in accept_score
-            quality_weight: Weight for quality in accept_score
-            accept_threshold: Threshold on accept_score for acceptance
+            acceptance_formula: Name of formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
+            acceptance_params: Parameters for the formula (scale, threshold, weights)
+            custom_acceptance_fn: Pass a custom acceptance function directly
+            verbose: Print progress
 
         Returns:
             MultiSeedSelectiveResult with metrics for this configuration
         """
+        from .acceptance import get_acceptance_fn, AcceptanceFunction
+
+        # Get acceptance function
+        if custom_acceptance_fn is not None:
+            accept_fn = custom_acceptance_fn
+        else:
+            accept_fn = get_acceptance_fn(acceptance_formula, acceptance_params)
+
         all_seed_metrics = []
 
         for seed_idx, seed_preds in enumerate(self.cached_predictions):
@@ -476,15 +486,8 @@ class FormulaExperiment:
             true_qualities = []
 
             for pred in seed_preds:
-                # Compute acceptance using EXACT same formula as deploy_pipeline.py
-                result = self._apply_formula(
-                    pred,
-                    agreement_formula=agreement_formula,
-                    agreement_scale=agreement_scale,
-                    agreement_weight=agreement_weight,
-                    quality_weight=quality_weight,
-                    accept_threshold=accept_threshold,
-                )
+                # Compute acceptance using the acceptance function
+                result = self._apply_acceptance(pred, accept_fn)
                 selective_predictions.append(result)
                 true_booms.append(pred.true_boom)
                 true_qualities.append(pred.true_quality)
@@ -508,42 +511,26 @@ class FormulaExperiment:
             seed_metrics=all_seed_metrics,
         )
 
-    def _apply_formula(
+    def _apply_acceptance(
         self,
         pred: CachedRawPrediction,
-        agreement_formula: str,
-        agreement_scale: float,
-        agreement_weight: float,
-        quality_weight: float,
-        accept_threshold: float,
+        accept_fn: 'AcceptanceFunction',
     ) -> SelectivePrediction:
         """
-        Apply acceptance formula to a cached prediction.
+        Apply acceptance function to a cached prediction.
 
-        IMPORTANT: This MUST match deploy_pipeline.py exactly!
+        This uses the same acceptance module as deploy_pipeline.py,
+        ensuring identical results.
         """
-        # Compute disagreement as range of predictions (0 = perfect agreement)
-        # Using max-min is consistent with original 2-model abs(a-b) formula
+        # Call acceptance function with model predictions and quality
+        accepted, accept_score = accept_fn(pred.model_predictions, pred.predicted_quality)
+
+        # Compute disagreement for metadata
         pred_values = list(pred.model_predictions.values())
         if len(pred_values) > 1:
             disagreement = float(max(pred_values) - min(pred_values))
         else:
             disagreement = 0.0
-
-        # Compute agreement score (1.0 = perfect, 0.0 = max disagreement)
-        if agreement_formula == 'sqrt':
-            agreement_score = 1.0 - np.sqrt(min(disagreement / agreement_scale, 1.0))
-        else:
-            agreement_score = 1.0 - min(disagreement / agreement_scale, 1.0)
-
-        # Combine agreement and quality into accept_score
-        accept_score = (
-            agreement_weight * agreement_score +
-            quality_weight * pred.predicted_quality
-        )
-
-        # Accept if score exceeds threshold
-        accepted = accept_score >= accept_threshold
 
         # Use primary model's prediction for boom_frame
         primary_pred = pred.model_predictions.get(
@@ -562,57 +549,80 @@ class FormulaExperiment:
 
     def sweep(
         self,
-        scales: list[float] | None = None,
         formulas: list[str] | None = None,
-        accept_thresholds: list[float] | None = None,
+        param_grid: dict | None = None,
         verbose: bool = True,
     ) -> dict[tuple, MultiSeedSelectiveResult]:
         """
         Run a sweep over multiple formula configurations.
 
         Args:
-            scales: List of agreement_scale values to try
-            formulas: List of agreement_formula values ('sqrt', 'linear')
-            accept_thresholds: List of accept_threshold values to try
+            formulas: List of formula names ('sqrt', 'linear', 'sigmoid', 'quadratic')
+            param_grid: Dict of parameter lists to sweep over. Common params:
+                - scale: list[float] - disagreement scale values
+                - threshold: list[float] - accept threshold values
+                - agreement_weight: list[float] - weight for agreement
+                - quality_weight: list[float] - weight for quality
             verbose: Print progress
 
         Returns:
             Dict mapping (formula, scale, threshold) -> MultiSeedSelectiveResult
+
+        Example:
+            results = experiment.sweep(
+                formulas=['sqrt', 'linear'],
+                param_grid={
+                    'scale': [5, 10, 15],
+                    'threshold': [0.55, 0.60, 0.65],
+                },
+            )
         """
-        if scales is None:
-            scales = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0]
+        import itertools
+
         if formulas is None:
             formulas = ['sqrt']
-        if accept_thresholds is None:
-            accept_thresholds = [0.60]
+        if param_grid is None:
+            param_grid = {'scale': [3.0, 5.0, 7.0, 10.0, 15.0, 20.0], 'threshold': [0.60]}
 
-        results = {}
-        total = len(scales) * len(formulas) * len(accept_thresholds)
-        count = 0
+        # Get parameter names and values
+        param_names = list(param_grid.keys())
+        param_values = [list(param_grid[k]) for k in param_names]
+
+        # Generate all combinations
+        all_param_combos = list(itertools.product(*param_values))
+        total = len(formulas) * len(all_param_combos)
 
         if verbose:
-            print(f"\nRunning sweep: {len(scales)} scales x {len(formulas)} formulas x {len(accept_thresholds)} thresholds = {total} configs")
+            print(f"\nRunning sweep: {len(formulas)} formulas x {len(all_param_combos)} param combos = {total} configs")
             print("-" * 70)
 
-        for formula in formulas:
-            for scale in scales:
-                for threshold in accept_thresholds:
-                    count += 1
-                    result = self.evaluate(
-                        agreement_formula=formula,
-                        agreement_scale=scale,
-                        accept_threshold=threshold,
-                        verbose=False,
-                    )
-                    key = (formula, scale, threshold)
-                    results[key] = result
+        results = {}
+        count = 0
 
-                    if verbose:
-                        mae = result.mean_metrics.get('selective_mae', float('nan'))
-                        mae_std = result.std_metrics.get('selective_mae', 0)
-                        cov = result.mean_metrics.get('coverage', 0)
-                        print(f"  [{count}/{total}] {formula}/scale={scale:.0f}/thresh={threshold:.2f}: "
-                              f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
+        for formula in formulas:
+            for combo in all_param_combos:
+                count += 1
+                # Build params dict from combo
+                params = dict(zip(param_names, combo))
+
+                result = self.evaluate(
+                    acceptance_formula=formula,
+                    acceptance_params=params,
+                    verbose=False,
+                )
+
+                # Use (formula, scale, threshold) as key for backwards compatibility
+                scale = params.get('scale', 15.0)
+                threshold = params.get('threshold', 0.60)
+                key = (formula, scale, threshold)
+                results[key] = result
+
+                if verbose:
+                    mae = result.mean_metrics.get('selective_mae', float('nan'))
+                    mae_std = result.std_metrics.get('selective_mae', 0)
+                    cov = result.mean_metrics.get('coverage', 0)
+                    print(f"  [{count}/{total}] {formula}/scale={scale:.0f}/thresh={threshold:.2f}: "
+                          f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
 
         return results
 

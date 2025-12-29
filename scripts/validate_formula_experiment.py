@@ -60,16 +60,14 @@ def main():
 
     # Define test configuration
     test_config = {
-        'agreement_formula': 'sqrt',
-        'agreement_scale': 5.0,
-        'accept_threshold': 0.60,
+        'acceptance_formula': 'sqrt',
+        'acceptance_params': {'scale': 5.0, 'threshold': 0.60},
     }
     seeds = [42, 43, 44]
 
     print(f"\nTest configuration:")
-    print(f"  agreement_formula: {test_config['agreement_formula']}")
-    print(f"  agreement_scale: {test_config['agreement_scale']}")
-    print(f"  accept_threshold: {test_config['accept_threshold']}")
+    print(f"  acceptance_formula: {test_config['acceptance_formula']}")
+    print(f"  acceptance_params: {test_config['acceptance_params']}")
     print(f"  seeds: {seeds}")
 
     # =========================================================================
@@ -83,9 +81,8 @@ def main():
     print("\nTraining models and caching predictions...")
     experiment = evaluator.create_formula_experiment(
         predictor_fn=lambda: BoomDetectionPipeline(
-            accept_threshold=0.60,  # Initial value, will be overridden
-            agreement_formula='sqrt',  # Will be overridden
-            agreement_scale=15.0,  # Will be overridden
+            acceptance_formula='sqrt',  # Initial value, will be overridden
+            acceptance_params={'scale': 15.0, 'threshold': 0.60},
         ),
         k=5,
         seeds=seeds,
@@ -95,9 +92,8 @@ def main():
     # Evaluate with test config
     print("\nEvaluating with FormulaExperiment...")
     formula_result = experiment.evaluate(
-        agreement_formula=test_config['agreement_formula'],
-        agreement_scale=test_config['agreement_scale'],
-        accept_threshold=test_config['accept_threshold'],
+        acceptance_formula=test_config['acceptance_formula'],
+        acceptance_params=test_config['acceptance_params'],
         verbose=True,
     )
 
@@ -120,9 +116,8 @@ def main():
     print("\nRunning full cross_validate_selective with same config...")
     direct_result = evaluator.cross_validate_selective(
         predictor_fn=lambda: BoomDetectionPipeline(
-            accept_threshold=test_config['accept_threshold'],
-            agreement_formula=test_config['agreement_formula'],
-            agreement_scale=test_config['agreement_scale'],
+            acceptance_formula=test_config['acceptance_formula'],
+            acceptance_params=test_config['acceptance_params'],
         ),
         k=5,
         seeds=seeds,
@@ -178,9 +173,11 @@ def main():
     print("=" * 70)
 
     sweep_results = experiment.sweep(
-        scales=[3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0],
         formulas=['sqrt'],
-        accept_thresholds=[0.60],
+        param_grid={
+            'scale': [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0],
+            'threshold': [0.60],
+        },
         verbose=True,
     )
 

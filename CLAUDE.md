@@ -39,14 +39,17 @@ The boom is the moment of chaotic divergence: when nearly-identical pendulums su
 ```python
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# Train pipeline with different selectivity levels:
-# - Most selective: agreement_scale=5 -> MAE 3.4 at 14% coverage
-# - Balanced: agreement_scale=10 -> MAE 4.9 at 22% coverage
-# - Permissive: agreement_scale=15 -> MAE 4.9 at 30% coverage
+# Train pipeline with different selectivity levels using acceptance API:
+# - Most selective: scale=5 -> MAE 3.4 at 14% coverage
+# - Balanced: scale=10 -> MAE 4.9 at 22% coverage
+# - Permissive: scale=15 -> MAE 4.9 at 30% coverage
 pipeline = BoomDetectionPipeline(
-    frame_models=('cnn', 'hgb'),  # Default: 2-model pipeline
-    agreement_formula='sqrt',      # 'linear' or 'sqrt'
-    agreement_scale=5.0,           # Lower = more selective
+    acceptance_formula='sqrt',        # 'sqrt', 'linear', 'sigmoid', 'quadratic'
+    acceptance_params={
+        'scale': 5.0,                 # Lower = more selective
+        'threshold': 0.60,            # Accept if score >= threshold
+    },
+    frame_models=('cnn', 'hgb'),      # Default: 2-model pipeline
 )
 
 pipeline.fit(sim_ids, boom_frames, qualities, cache)
@@ -79,7 +82,10 @@ print(f"MAE: {result.mean_metrics['mae']:.2f} ± {result.std_metrics['mae']:.2f}
 
 # For selective (abstaining) models like BoomDetectionPipeline:
 result = evaluator.cross_validate_selective(
-    lambda: BoomDetectionPipeline(accept_threshold=0.60, agreement_formula='sqrt'),
+    lambda: BoomDetectionPipeline(
+        acceptance_formula='sqrt',
+        acceptance_params={'scale': 15.0, 'threshold': 0.60},
+    ),
     seeds=[42, 43, 44, 45, 46],
 )
 print(f"Selective MAE: {result.mean_metrics['selective_mae']:.2f}")

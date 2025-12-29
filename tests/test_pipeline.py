@@ -55,37 +55,46 @@ class TestPipelineValidation:
 class TestPipelineConfig:
     """Tests for pipeline configuration."""
 
-    def test_default_thresholds(self):
-        """Default thresholds should match documented values."""
+    def test_default_config(self):
+        """Default config should match documented values."""
         pipeline = BoomDetectionPipeline()
-        assert pipeline.accept_threshold == 0.60  # Increased to compensate for overconfidence
-        assert pipeline.agreement_weight == 0.4
-        assert pipeline.quality_weight == 0.6
-        assert pipeline.agreement_formula == 'sqrt'  # Default is sqrt
-        assert pipeline.agreement_scale == 15.0  # Default for sqrt
+        # New acceptance API - check internal state
+        assert pipeline._acceptance_formula == 'sqrt'
+        assert pipeline._acceptance_params == {}  # Uses defaults from acceptance module
         assert pipeline.quality_window == 25
         assert pipeline.n_quality_features == 50
 
-    def test_sqrt_agreement_defaults(self):
-        """Sqrt agreement formula should use scale 15 by default."""
-        pipeline = BoomDetectionPipeline(agreement_formula='sqrt')
-        assert pipeline.agreement_formula == 'sqrt'
-        assert pipeline.agreement_scale == 15.0  # Default for sqrt
-
-    def test_custom_thresholds(self):
-        """Custom thresholds should be stored correctly."""
+    def test_custom_acceptance_params(self):
+        """Custom acceptance params should be stored correctly."""
         pipeline = BoomDetectionPipeline(
-            accept_threshold=0.6,
-            agreement_weight=0.3,
-            quality_weight=0.7,
-            quality_window=30,
-            n_quality_features=100,
+            acceptance_formula='linear',
+            acceptance_params={'scale': 5.0, 'threshold': 0.70},
         )
-        assert pipeline.accept_threshold == 0.6
-        assert pipeline.agreement_weight == 0.3
-        assert pipeline.quality_weight == 0.7
-        assert pipeline.quality_window == 30
-        assert pipeline.n_quality_features == 100
+        assert pipeline._acceptance_formula == 'linear'
+        assert pipeline._acceptance_params == {'scale': 5.0, 'threshold': 0.70}
+
+    def test_custom_acceptance_fn(self):
+        """Custom acceptance function should work."""
+        def custom_fn(model_predictions, predicted_quality):
+            return True, 0.99  # Always accept with high score
+
+        pipeline = BoomDetectionPipeline(custom_acceptance_fn=custom_fn)
+        assert pipeline._acceptance_formula is None  # Not serializable
+        assert pipeline._acceptance_fn is custom_fn
+
+    def test_invalid_formula_raises(self):
+        """Invalid formula should raise ValueError."""
+        with pytest.raises(ValueError, match="Unknown formula"):
+            BoomDetectionPipeline(acceptance_formula='invalid')
+
+    def test_set_acceptance_updates_fn(self):
+        """set_acceptance should update the acceptance function."""
+        pipeline = BoomDetectionPipeline(acceptance_formula='sqrt')
+        assert pipeline._acceptance_formula == 'sqrt'
+
+        pipeline.set_acceptance(formula='linear', params={'scale': 5.0})
+        assert pipeline._acceptance_formula == 'linear'
+        assert pipeline._acceptance_params == {'scale': 5.0}
 
 
 class TestPipelineOutput:

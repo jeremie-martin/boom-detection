@@ -63,7 +63,11 @@ class TestPipelineIntegration:
         from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
         # Train pipeline
-        pipeline = BoomDetectionPipeline(accept_threshold=0.4, seed=42)
+        pipeline = BoomDetectionPipeline(
+            acceptance_formula='sqrt',
+            acceptance_params={'threshold': 0.4},
+            seed=42,
+        )
         pipeline.fit(
             multi_sim_data['sim_ids'],
             multi_sim_data['boom_frames'],

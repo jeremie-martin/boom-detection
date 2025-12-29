@@ -49,6 +49,7 @@ from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
 from .logging_config import logger
 from .metrics import SelectivePrediction
 from .sequence_models import CNNClassifier, LSTMClassifier, SequenceTrainer
+from .acceptance import AcceptanceFunction, get_acceptance_fn, ACCEPTANCE_REGISTRY
 
 # Valid frame model names
 VALID_FRAME_MODELS = ('cnn', 'hgb', 'lstm')
@@ -67,11 +68,11 @@ class BoomDetectionPipeline:
 
     def __init__(
         self,
-        accept_threshold: float = 0.60,  # Threshold on accept_score
-        agreement_weight: float = 0.4,  # Weight for agreement in accept_score
-        quality_weight: float = 0.6,  # Weight for quality in accept_score
-        agreement_formula: str = 'sqrt',  # 'linear' or 'sqrt'
-        agreement_scale: float | None = None,  # Scale for agreement (default: 10 for linear, 15 for sqrt)
+        # New acceptance API
+        acceptance_formula: str = 'sqrt',  # 'sqrt', 'linear', 'sigmoid', 'quadratic'
+        acceptance_params: dict | None = None,  # Params for the formula (scale, threshold, weights)
+        custom_acceptance_fn: AcceptanceFunction | None = None,  # Pass custom function (not serializable)
+        # Other params
         quality_window: int = 25,  # Window around predicted boom for quality features
         n_quality_features: int = 50,  # Top correlated features for quality prediction
         seed: int | None = None,  # Random seed for reproducibility
@@ -80,6 +81,27 @@ class BoomDetectionPipeline:
         primary_model: str = 'cnn',  # Which model's prediction to use when accepted
         feature_config: FeatureConfig | None = None,  # Feature extraction config (saved with model)
     ):
+        """
+        Initialize boom detection pipeline.
+
+        Args:
+            acceptance_formula: Name of acceptance formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
+            acceptance_params: Parameters for the formula. Available params depend on formula:
+                - scale: float - Disagreement at which agreement becomes 0 (default: 15.0 for sqrt)
+                - threshold: float - Accept if accept_score >= threshold (default: 0.60)
+                - agreement_weight: float - Weight for agreement in accept_score (default: 0.4)
+                - quality_weight: float - Weight for quality in accept_score (default: 0.6)
+            custom_acceptance_fn: Pass a custom acceptance function directly. If provided,
+                this overrides acceptance_formula/params. Note: custom functions cannot be
+                serialized with save().
+            quality_window: Window around predicted boom for quality features
+            n_quality_features: Top correlated features for quality prediction
+            seed: Random seed for reproducibility
+            calibrate_quality: Calibrate quality predictions with isotonic regression
+            frame_models: Which frame models to use for agreement ('cnn', 'hgb', 'lstm')
+            primary_model: Which model's prediction to use when accepted
+            feature_config: Feature extraction config (saved with model)
+        """
         # Validate frame_models
         for model in frame_models:
             if model not in VALID_FRAME_MODELS:
@@ -87,15 +109,19 @@ class BoomDetectionPipeline:
         if primary_model not in frame_models:
             raise ValueError(f"primary_model '{primary_model}' must be in frame_models {frame_models}")
 
-        self.accept_threshold = accept_threshold
-        self.agreement_weight = agreement_weight
-        self.quality_weight = quality_weight
-        self.agreement_formula = agreement_formula
-        # Default scale depends on formula
-        if agreement_scale is None:
-            self.agreement_scale = 15.0 if agreement_formula == 'sqrt' else 10.0
+        # Set up acceptance function
+        if custom_acceptance_fn is not None:
+            self._acceptance_fn = custom_acceptance_fn
+            self._acceptance_formula = None  # Not serializable
+            self._acceptance_params = None
         else:
-            self.agreement_scale = agreement_scale
+            if acceptance_formula not in ACCEPTANCE_REGISTRY:
+                available = list(ACCEPTANCE_REGISTRY.keys())
+                raise ValueError(f"Unknown formula: {acceptance_formula}. Available: {available}")
+            self._acceptance_formula = acceptance_formula
+            self._acceptance_params = acceptance_params or {}
+            self._acceptance_fn = get_acceptance_fn(acceptance_formula, self._acceptance_params)
+
         self.quality_window = quality_window
         self.n_quality_features = n_quality_features
         self.seed = seed
@@ -115,6 +141,37 @@ class BoomDetectionPipeline:
     def set_seed(self, seed: int) -> None:
         """Set the random seed for reproducibility."""
         self.seed = seed
+
+    def set_acceptance(
+        self,
+        formula: str | None = None,
+        params: dict | None = None,
+        custom_fn: AcceptanceFunction | None = None,
+    ) -> None:
+        """
+        Update the acceptance function at runtime.
+
+        Useful for FormulaExperiment to test different configurations
+        without recreating the pipeline.
+
+        Args:
+            formula: Name of acceptance formula (mutually exclusive with custom_fn)
+            params: Parameters for the formula
+            custom_fn: Custom acceptance function (mutually exclusive with formula)
+        """
+        if custom_fn is not None:
+            self._acceptance_fn = custom_fn
+            self._acceptance_formula = None
+            self._acceptance_params = None
+        elif formula is not None:
+            if formula not in ACCEPTANCE_REGISTRY:
+                available = list(ACCEPTANCE_REGISTRY.keys())
+                raise ValueError(f"Unknown formula: {formula}. Available: {available}")
+            self._acceptance_formula = formula
+            self._acceptance_params = params or {}
+            self._acceptance_fn = get_acceptance_fn(formula, self._acceptance_params)
+        else:
+            raise ValueError("Must provide either formula or custom_fn")
 
     def fit(
         self,
@@ -280,8 +337,6 @@ class BoomDetectionPipeline:
             ValueError: If features has wrong shape
             RuntimeError: If pipeline has not been fitted
         """
-        import torch
-
         # Input validation
         if not self.trained_models:
             raise RuntimeError("Pipeline not fitted. Call fit() first.")
@@ -300,33 +355,19 @@ class BoomDetectionPipeline:
         for model_name in self.frame_models:
             model_predictions[model_name] = self._predict_with_model(model_name, features)
 
-        # Compute disagreement as range of predictions (0 = perfect agreement)
-        # Using max-min is consistent with original 2-model abs(a-b) formula
-        # and generalizes naturally to N models
+        # Predict quality (using median of predictions as boom estimate)
         pred_values = list(model_predictions.values())
+        median_pred = int(np.median(pred_values))
+        predicted_quality = self._predict_quality(features, median_pred)
+
+        # Call acceptance function
+        accepted, accept_score = self._acceptance_fn(model_predictions, predicted_quality)
+
+        # Compute disagreement for metadata (useful for debugging)
         if len(pred_values) > 1:
             disagreement = float(max(pred_values) - min(pred_values))
         else:
             disagreement = 0.0
-
-        # Predict quality (using median of predictions as boom estimate)
-        median_pred = int(np.median(pred_values))
-        predicted_quality = self._predict_quality(features, median_pred)
-
-        # Compute agreement score (1.0 = perfect, 0.0 = max disagreement)
-        if self.agreement_formula == 'sqrt':
-            agreement_score = 1.0 - np.sqrt(min(disagreement / self.agreement_scale, 1.0))
-        else:
-            agreement_score = 1.0 - min(disagreement / self.agreement_scale, 1.0)
-
-        # Combine agreement and quality into accept_score
-        accept_score = (
-            self.agreement_weight * agreement_score +
-            self.quality_weight * predicted_quality
-        )
-
-        # Accept if score exceeds threshold
-        accepted = accept_score >= self.accept_threshold
 
         # Use primary model's prediction for boom_frame
         primary_pred = model_predictions[self.primary_model]
@@ -426,14 +467,17 @@ class BoomDetectionPipeline:
             joblib.dump(self.quality_calibrator, path / 'quality_calibrator.joblib')
 
         # Save pipeline config
+        if self._acceptance_formula is None:
+            raise ValueError(
+                "Cannot save pipeline with custom acceptance function. "
+                "Use registry-based formula for serialization."
+            )
+
         config = {
             'frame_models': list(self.frame_models),
             'primary_model': self.primary_model,
-            'accept_threshold': self.accept_threshold,
-            'agreement_weight': self.agreement_weight,
-            'quality_weight': self.quality_weight,
-            'agreement_formula': self.agreement_formula,
-            'agreement_scale': self.agreement_scale,
+            'acceptance_formula': self._acceptance_formula,
+            'acceptance_params': self._acceptance_params,
             'quality_window': self.quality_window,
             'n_quality_features': self.n_quality_features,
             'n_features': self.n_features,
@@ -483,13 +527,14 @@ class BoomDetectionPipeline:
         frame_models = tuple(config.get('frame_models', ['cnn', 'hgb']))
         primary_model = config.get('primary_model', 'cnn')
 
+        # Get acceptance config - new format uses acceptance_formula/acceptance_params
+        acceptance_formula = config.get('acceptance_formula', 'sqrt')
+        acceptance_params = config.get('acceptance_params', {})
+
         # Create pipeline with saved config
         pipeline = cls(
-            accept_threshold=config.get('accept_threshold', 0.60),
-            agreement_weight=config.get('agreement_weight', 0.4),
-            quality_weight=config.get('quality_weight', 0.6),
-            agreement_formula=config.get('agreement_formula', 'sqrt'),
-            agreement_scale=config.get('agreement_scale'),
+            acceptance_formula=acceptance_formula,
+            acceptance_params=acceptance_params,
             quality_window=config['quality_window'],
             n_quality_features=config['n_quality_features'],
             calibrate_quality=config.get('calibrate_quality', False),
@@ -622,9 +667,8 @@ def cross_validate(
     cache: FeatureCache,
     n_splits: int = 5,
     seeds: list[int] | None = None,
-    accept_threshold: float = 0.53,  # Equivalent to agreement=5, quality=0.55
-    agreement_weight: float = 0.4,
-    quality_weight: float = 0.6,
+    acceptance_formula: str = 'sqrt',
+    acceptance_params: dict | None = None,
     verbose: bool = True,
 ) -> dict:
     """
@@ -636,7 +680,7 @@ def cross_validate(
     For new code, prefer using CachedEvaluator directly:
         evaluator = CachedEvaluator(dataset, cache)
         result = evaluator.cross_validate_selective(
-            lambda: BoomDetectionPipeline(accept_threshold=0.53),
+            lambda: BoomDetectionPipeline(acceptance_formula='sqrt'),
         )
 
     Args:
@@ -646,9 +690,8 @@ def cross_validate(
         cache: FeatureCache with extracted features
         n_splits: Number of CV folds
         seeds: Random seeds (default: 5 seeds for robust evaluation)
-        accept_threshold: Threshold on accept_score (0-1)
-        agreement_weight: Weight for model agreement in accept_score
-        quality_weight: Weight for predicted quality in accept_score
+        acceptance_formula: Name of acceptance formula ('sqrt', 'linear', 'sigmoid', 'quadratic')
+        acceptance_params: Parameters for the formula (scale, threshold, weights)
         verbose: Print progress
 
     Returns:
@@ -678,12 +721,14 @@ def cross_validate(
     dataset = MinimalDataset(sim_ids, boom_frames, qualities)
     evaluator = CachedEvaluator(dataset, cache)
 
+    # Capture params for the lambda
+    params = acceptance_params or {}
+
     # Use the unified evaluator
     result: MultiSeedSelectiveResult = evaluator.cross_validate_selective(
         lambda: BoomDetectionPipeline(
-            accept_threshold=accept_threshold,
-            agreement_weight=agreement_weight,
-            quality_weight=quality_weight,
+            acceptance_formula=acceptance_formula,
+            acceptance_params=params,
         ),
         k=n_splits,
         seeds=seeds,
@@ -705,9 +750,8 @@ def cross_validate(
         # Per-seed results for analysis
         'seed_metrics': result.seed_metrics,
         # Config
-        'accept_threshold': accept_threshold,
-        'agreement_weight': agreement_weight,
-        'quality_weight': quality_weight,
+        'acceptance_formula': acceptance_formula,
+        'acceptance_params': params,
         # Also expose the full result object for new code
         '_result': result,
     }
@@ -720,12 +764,12 @@ def main():
     parser.add_argument('--quick', action='store_true', help='Quick single-seed evaluation')
     parser.add_argument('--train', action='store_true', help='Train and save models')
     parser.add_argument('--output', type=Path, help='Output directory for models')
-    parser.add_argument('--accept-threshold', type=float, default=0.60,
+    parser.add_argument('--acceptance-formula', choices=['sqrt', 'linear', 'sigmoid', 'quadratic'],
+                        default='sqrt', help='Acceptance formula (default: sqrt)')
+    parser.add_argument('--scale', type=float, default=15.0,
+                        help='Scale parameter for acceptance formula (default: 15.0)')
+    parser.add_argument('--threshold', type=float, default=0.60,
                         help='Accept score threshold (0-1, default 0.60)')
-    parser.add_argument('--agreement-formula', choices=['linear', 'sqrt'], default='sqrt',
-                        help='Agreement formula: linear or sqrt (default: sqrt)')
-    parser.add_argument('--agreement-scale', type=float, default=15.0,
-                        help='Agreement scale (default: 15 for sqrt, 10 for linear)')
     parser.add_argument('--production', action='store_true',
                         help='Use PRODUCTION_CONFIG with caustic features (recommended)')
     parser.add_argument('--save-run', type=Path, default=None,
@@ -757,13 +801,20 @@ def main():
         seeds = [42] if args.quick else [42, 43, 44, 45, 46]
         mode = "quick (1 seed)" if args.quick else "robust (5 seeds)"
 
+        # Build acceptance params from CLI args
+        acceptance_params = {
+            'scale': args.scale,
+            'threshold': args.threshold,
+        }
+
         print(f"\nRunning {mode} 5-fold cross-validation...")
-        print(f"Accept threshold: {args.accept_threshold}")
+        print(f"Formula: {args.acceptance_formula}, scale={args.scale}, threshold={args.threshold}")
 
         results = cross_validate(
             sim_ids, boom_frames, qualities, cache,
             seeds=seeds,
-            accept_threshold=args.accept_threshold,
+            acceptance_formula=args.acceptance_formula,
+            acceptance_params=acceptance_params,
         )
 
         print()
@@ -809,7 +860,8 @@ def main():
 
             # Create config dict
             run_config = {
-                'accept_threshold': args.accept_threshold,
+                'acceptance_formula': args.acceptance_formula,
+                'acceptance_params': acceptance_params,
                 'production_features': args.production,
                 'n_splits': results['n_splits'],
                 'seeds': results['seeds'],
@@ -865,15 +917,19 @@ def main():
         if not args.output:
             parser.error("--output required when using --train")
 
+        # Build acceptance params from CLI args
+        train_acceptance_params = {
+            'scale': args.scale,
+            'threshold': args.threshold,
+        }
+
         print("\nTraining final models...")
-        print(f"  accept_threshold: {args.accept_threshold}")
-        print(f"  agreement_formula: {args.agreement_formula}")
-        print(f"  agreement_scale: {args.agreement_scale}")
+        print(f"  acceptance_formula: {args.acceptance_formula}")
+        print(f"  acceptance_params: {train_acceptance_params}")
 
         pipeline = BoomDetectionPipeline(
-            accept_threshold=args.accept_threshold,
-            agreement_formula=args.agreement_formula,
-            agreement_scale=args.agreement_scale,
+            acceptance_formula=args.acceptance_formula,
+            acceptance_params=train_acceptance_params,
             calibrate_quality=True,
             feature_config=config,
         )

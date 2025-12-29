@@ -33,29 +33,27 @@ from boom_detection.deploy_pipeline import BoomDetectionPipeline
 from boom_detection.logging_config import log_memory_usage
 
 
-def create_2model_factory(agreement_scale: float = 15.0):
+def create_2model_factory(scale: float = 15.0):
     """Factory for 2-model (CNN + HGB) pipeline."""
     def factory():
         return BoomDetectionPipeline(
             frame_models=('cnn', 'hgb'),
             primary_model='cnn',
-            accept_threshold=0.60,
-            agreement_formula='sqrt',
-            agreement_scale=agreement_scale,
+            acceptance_formula='sqrt',
+            acceptance_params={'scale': scale, 'threshold': 0.60},
             calibrate_quality=True,
         )
     return factory
 
 
-def create_3model_factory(agreement_scale: float = 10.0):
+def create_3model_factory(scale: float = 10.0):
     """Factory for 3-model (CNN + HGB + LSTM) pipeline."""
     def factory():
         return BoomDetectionPipeline(
             frame_models=('cnn', 'hgb', 'lstm'),
             primary_model='cnn',
-            accept_threshold=0.60,
-            agreement_formula='sqrt',
-            agreement_scale=agreement_scale,
+            acceptance_formula='sqrt',
+            acceptance_params={'scale': scale, 'threshold': 0.60},
             calibrate_quality=True,
         )
     return factory
@@ -82,7 +80,7 @@ def evaluate_configurations(
         start = time.time()
 
         result = evaluator.cross_validate_selective(
-            create_2model_factory(agreement_scale=scale),
+            create_2model_factory(scale=scale),
             seeds=seeds,
             verbose=False,
         )
@@ -94,7 +92,7 @@ def evaluate_configurations(
             'coverage': result.mean_metrics['coverage'],
             'coverage_std': result.std_metrics['coverage'],
             'frame_models': ('cnn', 'hgb'),
-            'agreement_scale': scale,
+            'scale': scale,
             'time': elapsed,
         }
 
@@ -109,7 +107,7 @@ def evaluate_configurations(
         start = time.time()
 
         result = evaluator.cross_validate_selective(
-            create_3model_factory(agreement_scale=scale),
+            create_3model_factory(scale=scale),
             seeds=seeds,
             verbose=False,
         )
@@ -121,7 +119,7 @@ def evaluate_configurations(
             'coverage': result.mean_metrics['coverage'],
             'coverage_std': result.std_metrics['coverage'],
             'frame_models': ('cnn', 'hgb', 'lstm'),
-            'agreement_scale': scale,
+            'scale': scale,
             'time': elapsed,
         }
 

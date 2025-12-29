@@ -33,6 +33,18 @@ from .metrics import (
     find_optimal_threshold,
 )
 
+# Acceptance functions (pure numpy, no ML dependencies)
+from .acceptance import (
+    AcceptanceFunction,
+    ACCEPTANCE_REGISTRY,
+    get_acceptance_fn,
+    list_formulas,
+    make_sqrt_acceptance,
+    make_linear_acceptance,
+    make_sigmoid_acceptance,
+    make_quadratic_acceptance,
+)
+
 __all__ = [
     # Loader (always available)
     "Annotation",
@@ -58,6 +70,15 @@ __all__ = [
     "coverage_at_max_mae",
     "min_mae_at_coverage",
     "find_optimal_threshold",
+    # Acceptance functions (always available)
+    "AcceptanceFunction",
+    "ACCEPTANCE_REGISTRY",
+    "get_acceptance_fn",
+    "list_formulas",
+    "make_sqrt_acceptance",
+    "make_linear_acceptance",
+    "make_sigmoid_acceptance",
+    "make_quadratic_acceptance",
 ]
 
 # =============================================================================

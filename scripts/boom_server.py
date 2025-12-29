@@ -278,7 +278,7 @@ def run_server(model_path: Path, socket_path: Path) -> None:
     log.success(f"Model loaded in {load_time:.1f}s")
     log.info(f"  Features: {pipeline.n_features}")
     log.info(f"  Max pendulums: {pipeline.feature_config.max_pendulums or 'unlimited'}")
-    log.info(f"  Accept threshold: {pipeline.accept_threshold}")
+    log.info(f"  Acceptance: {pipeline._acceptance_formula} with params {pipeline._acceptance_params}")
     print()
 
     # Remove existing socket file
