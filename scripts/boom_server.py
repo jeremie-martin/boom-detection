@@ -44,15 +44,106 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import signal
 import socket
 import struct
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+class Logger:
+    """Simple logger with timestamps and colors."""
+
+    COLORS = {
+        'reset': '\033[0m',
+        'green': '\033[32m',
+        'yellow': '\033[33m',
+        'red': '\033[31m',
+        'cyan': '\033[36m',
+        'dim': '\033[2m',
+    }
+
+    def __init__(self, use_color: bool = True):
+        self.use_color = use_color
+        self.request_count = 0
+        self.accepted_count = 0
+        self.rejected_count = 0
+        self.error_count = 0
+        self.total_time = 0.0
+
+    def _color(self, name: str) -> str:
+        return self.COLORS[name] if self.use_color else ''
+
+    def _timestamp(self) -> str:
+        return datetime.now().strftime('%H:%M:%S')
+
+    def info(self, msg: str) -> None:
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} {msg}")
+
+    def success(self, msg: str) -> None:
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} {self._color('green')}✓{self._color('reset')} {msg}")
+
+    def warning(self, msg: str) -> None:
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} {self._color('yellow')}⚠{self._color('reset')} {msg}")
+
+    def error(self, msg: str) -> None:
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} {self._color('red')}✗{self._color('reset')} {msg}")
+
+    def request(self, req_type: str, details: str) -> None:
+        self.request_count += 1
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} "
+              f"{self._color('cyan')}←{self._color('reset')} "
+              f"#{self.request_count} {req_type}: {details}")
+
+    def response(self, accepted: bool, boom_frame: int | None, elapsed_ms: float, details: str) -> None:
+        self.total_time += elapsed_ms / 1000.0
+
+        if accepted:
+            self.accepted_count += 1
+            status = f"{self._color('green')}ACCEPTED{self._color('reset')} boom@{boom_frame}"
+        else:
+            self.rejected_count += 1
+            status = f"{self._color('yellow')}REJECTED{self._color('reset')}"
+
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} "
+              f"{self._color('cyan')}→{self._color('reset')} "
+              f"{status} ({elapsed_ms:.0f}ms) {details}")
+
+    def response_error(self, error_msg: str, elapsed_ms: float) -> None:
+        self.error_count += 1
+        self.total_time += elapsed_ms / 1000.0
+        print(f"{self._color('dim')}[{self._timestamp()}]{self._color('reset')} "
+              f"{self._color('red')}→ ERROR{self._color('reset')} ({elapsed_ms:.0f}ms) {error_msg}")
+
+    def stats(self) -> str:
+        total = self.accepted_count + self.rejected_count + self.error_count
+        if total == 0:
+            return "No requests processed"
+
+        accept_rate = self.accepted_count / total * 100 if total > 0 else 0
+        avg_time = self.total_time / total * 1000 if total > 0 else 0
+
+        return (f"Processed {total} requests: "
+                f"{self.accepted_count} accepted ({accept_rate:.0f}%), "
+                f"{self.rejected_count} rejected, "
+                f"{self.error_count} errors. "
+                f"Avg time: {avg_time:.0f}ms")
+
+
+log = Logger()
+
+
+# =============================================================================
+# Protocol helpers
+# =============================================================================
 
 def recv_exactly(conn: socket.socket, n: int) -> bytes:
     """Receive exactly n bytes from socket."""
@@ -71,6 +162,10 @@ def send_response(conn: socket.socket, response: dict) -> None:
     conn.sendall(struct.pack('<I', len(data)) + data)
 
 
+# =============================================================================
+# Request handler
+# =============================================================================
+
 def handle_client(conn: socket.socket, pipeline) -> bool:
     """
     Handle a single client request.
@@ -78,6 +173,8 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
     Returns:
         True to continue serving, False to shutdown
     """
+    start_time = time.perf_counter()
+
     try:
         # Read header length (4 bytes, uint32 little-endian)
         header_len_data = recv_exactly(conn, 4)
@@ -90,12 +187,17 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
         request_type = header.get('type', 'path')
 
         if request_type == 'shutdown':
+            log.info("Shutdown requested")
             send_response(conn, {'status': 'ok', 'message': 'shutting down'})
             return False
 
         elif request_type == 'path':
             # File path mode
             sim_path = header['path']
+            # Shorten path for display
+            display_path = Path(sim_path).name if '/' in sim_path else sim_path
+            log.request('path', display_path)
+
             result = pipeline.predict_file(sim_path)
 
         elif request_type == 'binary':
@@ -104,8 +206,11 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
             pendulums = header['pendulums']
             values_per_pendulum = header.get('values', 8)
 
-            # Read binary data
             data_size = frames * pendulums * values_per_pendulum * 4  # float32
+            data_mb = data_size / (1024 * 1024)
+            log.request('binary', f"{frames} frames × {pendulums} pendulums ({data_mb:.1f} MB)")
+
+            # Read binary data
             data_bytes = recv_exactly(conn, data_size)
 
             # Reshape to (frames, pendulums, 8)
@@ -116,10 +221,15 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
             result = pipeline.predict_simulation(data)
 
         else:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            log.response_error(f"Unknown request type: {request_type}", elapsed_ms)
             send_response(conn, {'status': 'error', 'message': f'unknown type: {request_type}'})
             return True
 
-        # Send successful response (convert numpy types to Python types)
+        # Calculate elapsed time
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        # Build response
         response = {
             'status': 'ok',
             'accepted': bool(result.accepted),
@@ -130,12 +240,21 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
             'predicted_quality': round(float(result.predicted_quality), 4),
             'accept_score': round(float(result.accept_score), 4),
         }
+
+        # Log response
+        details = f"quality={result.predicted_quality:.2f} agree={result.disagreement} score={result.accept_score:.2f}"
+        log.response(result.accepted, response['boom_frame'], elapsed_ms, details)
+
         send_response(conn, response)
         return True
 
     except ConnectionError:
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        log.warning(f"Client disconnected ({elapsed_ms:.0f}ms)")
         return True
     except Exception as e:
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        log.response_error(str(e), elapsed_ms)
         try:
             send_response(conn, {'status': 'error', 'message': str(e)})
         except:
@@ -143,15 +262,24 @@ def handle_client(conn: socket.socket, pipeline) -> bool:
         return True
 
 
+# =============================================================================
+# Server
+# =============================================================================
+
 def run_server(model_path: Path, socket_path: Path) -> None:
     """Run the boom detection server."""
     from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
     # Load model
-    print(f"Loading model from {model_path}...")
+    log.info(f"Loading model from {model_path}...")
+    load_start = time.perf_counter()
     pipeline = BoomDetectionPipeline.from_pretrained(model_path)
-    print(f"  n_features: {pipeline.n_features}")
-    print(f"  max_pendulums: {pipeline.feature_config.max_pendulums}")
+    load_time = time.perf_counter() - load_start
+
+    log.success(f"Model loaded in {load_time:.1f}s")
+    log.info(f"  Features: {pipeline.n_features}")
+    log.info(f"  Max pendulums: {pipeline.feature_config.max_pendulums or 'unlimited'}")
+    log.info(f"  Accept threshold: {pipeline.accept_threshold}")
     print()
 
     # Remove existing socket file
@@ -167,23 +295,23 @@ def run_server(model_path: Path, socket_path: Path) -> None:
     running = True
     def handle_signal(signum, frame):
         nonlocal running
-        print("\nShutting down...")
+        print()
+        log.info("Received shutdown signal...")
         running = False
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    print(f"Server listening on {socket_path}")
-    print("Ready for predictions. Press Ctrl+C to stop.\n")
+    log.success(f"Server listening on {socket_path}")
+    log.info("Waiting for connections... (Ctrl+C to stop)")
+    print()
 
     # Set socket timeout so we can check running flag
     server.settimeout(1.0)
 
-    request_count = 0
     while running:
         try:
             conn, _ = server.accept()
-            request_count += 1
 
             try:
                 should_continue = handle_client(conn, pipeline)
@@ -196,11 +324,14 @@ def run_server(model_path: Path, socket_path: Path) -> None:
             continue
         except Exception as e:
             if running:
-                print(f"Error: {e}")
+                log.error(f"Server error: {e}")
 
-    print(f"\nShutdown complete. Handled {request_count} requests.")
+    print()
+    log.info(log.stats())
+    log.success("Server stopped")
     server.close()
-    socket_path.unlink()
+    if socket_path.exists():
+        socket_path.unlink()
 
 
 def main():
@@ -212,11 +343,15 @@ def main():
     parser.add_argument('model_path', type=Path, help='Path to saved model directory')
     parser.add_argument('--socket', '-s', type=Path, default=Path('/tmp/boom_server.sock'),
                        help='Unix socket path (default: /tmp/boom_server.sock)')
+    parser.add_argument('--no-color', action='store_true', help='Disable colored output')
 
     args = parser.parse_args()
 
+    if args.no_color:
+        log.use_color = False
+
     if not args.model_path.exists():
-        print(f"Error: Model not found at {args.model_path}")
+        log.error(f"Model not found at {args.model_path}")
         sys.exit(1)
 
     run_server(args.model_path, args.socket)
