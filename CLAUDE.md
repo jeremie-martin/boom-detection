@@ -89,13 +89,10 @@ uv run python -m boom_detection.deploy_pipeline data --predict models/v1
 
 ### The Deployable Pipeline
 ```python
-from boom_detection.combine import ThresholdCombiner
+from boom_detection.combine import ThresholdCombiner, FrameModelConfig
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# Train pipeline with different selectivity levels using Combiner API:
-# - Most selective: scale=5 -> MAE 3.4 at 14% coverage
-# - Balanced: scale=10 -> MAE 4.9 at 22% coverage
-# - Permissive: scale=15 -> MAE 4.9 at 30% coverage
+# Basic 2-model pipeline (recommended)
 pipeline = BoomDetectionPipeline(
     combiner=ThresholdCombiner(
         agreement_transform='sqrt',   # 'sqrt', 'linear', 'sigmoid', 'quadratic'
@@ -104,6 +101,25 @@ pipeline = BoomDetectionPipeline(
         primary_model='cnn',          # Use CNN prediction when accepted
     ),
     frame_models=('cnn', 'hgb'),      # Default: 2-model pipeline
+)
+
+# 3-model pipeline with LSTM
+pipeline = BoomDetectionPipeline(
+    combiner=ThresholdCombiner(
+        disagreement_metric='std',    # Use std for 3+ models (robust to outliers)
+        disagreement_scale=5.0,
+    ),
+    frame_models=('cnn', 'hgb', 'lstm'),
+)
+
+# With specialized model (trained on high-quality data only)
+pipeline = BoomDetectionPipeline(
+    combiner=ThresholdCombiner(primary_model='hgb_0.5'),  # Use specialized HGB
+    frame_models=(
+        'cnn',
+        'hgb',
+        FrameModelConfig('hgb', 0.5),  # hgb_0.5: trained on quality >= 0.5
+    ),
 )
 
 pipeline.fit(sim_ids, boom_frames, qualities, cache)
@@ -118,6 +134,60 @@ if result.accepted:
 # Save/load for deployment
 pipeline.save(Path("models/v1"))
 pipeline = BoomDetectionPipeline.from_pretrained(Path("models/v1"))
+```
+
+### FrameModelConfig - Unified Model Design
+
+Every frame model can be configured with a quality threshold for training data filtering:
+- `quality_threshold=0.0`: Train on ALL data (regular model)
+- `quality_threshold>0.0`: Train only on samples with quality >= threshold (specialized)
+
+This unifies the concept of "specialized" and "regular" models:
+```python
+from boom_detection.combine import FrameModelConfig
+
+# Regular model (train on all data)
+FrameModelConfig('hgb')           # equivalent to 'hgb' string
+
+# Specialized model (train on high-quality data only)
+FrameModelConfig('hgb', 0.5)      # hgb_0.5: trained on quality >= 0.5
+
+# String shorthand also works
+frame_models=('cnn', 'hgb', 'hgb_0.5')  # Parses 'hgb_0.5' to FrameModelConfig('hgb', 0.5)
+```
+
+**Key design insight**: The quality_threshold uses GROUND TRUTH quality during training (from annotations), not predicted quality. This is not "cheating" - we're just selecting which training samples to use.
+
+### CombinerExperiment - FREE Combiner Testing
+
+**Testing combiner configurations is FREE** - models are trained once, then combiners can be swapped instantly. This is the canonical way to experiment:
+
+```python
+from boom_detection.combine import ThresholdCombiner, QualityGatedCombiner
+from boom_detection.evaluation import CachedEvaluator
+
+evaluator = CachedEvaluator(dataset, cache)
+
+# Train models ONCE (slow)
+experiment = evaluator.create_combiner_experiment(
+    lambda: BoomDetectionPipeline(frame_models=('cnn', 'hgb', 'lstm')),
+    seeds=[42, 43, 44],
+)
+
+# Now iterate on combiners (FAST - no retraining!)
+for scale in [5, 10, 15, 20]:
+    combiner = ThresholdCombiner(disagreement_scale=scale, threshold=0.60)
+    result = experiment.evaluate(combiner)
+    print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
+
+# Or use grid sweep
+combiners = ThresholdCombiner.grid(
+    agreement_transform=['sqrt', 'linear'],
+    disagreement_scale=[5, 10, 15],
+    threshold=[0.50, 0.60, 0.70],
+)
+for combiner in combiners:
+    result = experiment.evaluate(combiner)
 ```
 
 ### Robust Evaluation (IMPORTANT!)
@@ -206,11 +276,15 @@ artifact.save(Path("runs/my_experiment"))
 
 | Script | When to Use |
 |--------|-------------|
-| `characterize_acceptance.py` | **Experiment with combiner configurations** - validates results, sweeps parameters |
+| `sweep_quality_only.py` | **Sweep QualityGatedCombiner thresholds** - simplest approach |
+| `sweep_2model.py` | **Sweep 2-model ThresholdCombiner** - comprehensive parameter exploration |
+| `sweep_3model.py` | **Sweep 3-model with std metric** - includes range comparison |
+| `sweep_specialized.py` | **Compare specialized vs baseline** - uses FrameModelConfig |
+| `characterize_acceptance.py` | **Validate documented results** - sweeps parameters, validates configs |
 | `boom_server.py` | **Deploy for real-time inference** - Unix socket server for C++ integration |
-| `evaluate_3model_pipeline.py` | Compare 2-model vs 3-model configurations |
 | `evaluate_lstm.py` | Evaluate individual models (CNN/HGB/LSTM) |
-| `comprehensive_evaluation.py` | Full evaluation with caustic formula comparison |
+
+All sweep scripts use `CombinerExperiment` to train models once and iterate on combiners instantly.
 
 ### Which Tool for Which Task?
 
