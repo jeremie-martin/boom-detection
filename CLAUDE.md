@@ -21,17 +21,18 @@ High quality booms typically involve the pendulums slowly separating into 2+ dis
 
 ## 3. Quick Reference: Best Results
 
-**90 simulations, 3-seed evaluation (42, 43, 44), PRODUCTION_CONFIG**
+**175 simulations, 3-seed evaluation (42, 43, 44), PRODUCTION_CONFIG**
 
 | Approach | Config | MAE | RMSE | Coverage | Notes |
 |----------|--------|-----|------|----------|-------|
-| **2-model best MAE** | sigmoid/s=3/t=0.70 | 2.53 ± 1.10 | 3.34 ± 1.68 | 4.1% | Best accuracy, low samples |
-| **2-model stable** | sqrt/s=15/t=0.70 | 2.78 ± 0.90 | 3.75 ± 1.19 | 11.5% | Recommended |
-| Quality-only | thresh=0.70 | 3.35 ± 1.39 | 4.49 ± 2.12 | 12.2% | Simplest |
-| 2-model balanced | sqrt/s=15/t=0.60 | 4.86 ± 1.28 | 8.73 ± 3.40 | 30.4% | Good coverage |
-| 3-model best | std/sqrt/s=8/t=0.55 | 5.18 ± 0.78 | 9.14 ± 2.37 | 34.4% | Not recommended |
+| **3-model (BEST)** | std/s=15/t=0.70 | 2.97 ± 0.06 | 4.25 ± 0.83 | 10.9% | **Recommended** |
+| 2-model best | sigmoid/s=10/t=0.70 | 3.48 ± 1.30 | 5.35 ± 2.31 | 15.8% | No longer best |
+| Quality-only | thresh=0.70 | 3.54 ± 0.94 | 5.61 ± 1.83 | 14.5% | Simplest baseline |
+| 2-model balanced | sigmoid/s=15/t=0.70 | 3.93 ± 1.17 | 5.84 ± 1.78 | 21.7% | Good coverage |
 
 **Key insight**: Testing combiner configurations is **FREE** - models train once, then combiners swap instantly. This is why we do parameter sweeps.
+
+**IMPORTANT**: Results from the 90-simulation dataset led to incorrect conclusions. See `EXPERIMENTS_175.md` for full analysis of what changed.
 
 ## 4. Detailed Results by Approach
 
@@ -41,9 +42,10 @@ Simplest approach: accept simulations based only on predicted quality score.
 
 | Threshold | MAE | RMSE | Coverage |
 |-----------|-----|------|----------|
-| 0.70 | 3.35 ± 1.39 | 4.49 ± 2.12 | 12.2% |
-| 0.65 | 4.50 ± 1.22 | 6.62 ± 1.81 | 31.5% |
-| 0.60 | 5.86 ± 0.65 | 10.51 ± 0.50 | 45.2% |
+| 0.75 | 1.86 ± 0.20 | 2.36 ± 0.29 | 1.9% |
+| **0.70** | **3.54 ± 0.94** | **5.61 ± 1.83** | **14.5%** |
+| 0.65 | 4.33 ± 1.14 | 6.74 ± 2.33 | 29.0% |
+| 0.60 | 6.24 ± 1.19 | 13.24 ± 2.33 | 43.0% |
 
 ```python
 from boom_detection.combine import QualityGatedCombiner
@@ -57,57 +59,74 @@ pipeline = BoomDetectionPipeline(
 
 ### 4.2 2-Model Pipeline (CNN + HGB with ThresholdCombiner)
 
-Uses model agreement to filter predictions. More complex but can achieve better accuracy.
+Uses model agreement to filter predictions. **No longer recommended** - 3-model pipeline is better.
 
 **Best configurations by use case:**
 
 | Use Case | Formula | Scale | Threshold | MAE | RMSE | Coverage |
 |----------|---------|-------|-----------|-----|------|----------|
-| Max accuracy | sigmoid | 3 | 0.70 | 2.53 ± 1.10 | 3.34 ± 1.68 | 4.1% |
-| Stable accuracy | sqrt | 15 | 0.70 | 2.78 ± 0.90 | 3.75 ± 1.19 | 11.5% |
-| Balanced | sqrt | 15 | 0.60 | 4.86 ± 1.28 | 8.73 ± 3.40 | 30.4% |
-| High coverage | sqrt | 30 | 0.60 | 6.37 ± 0.53 | 12.60 ± 3.68 | 43.0% |
+| Best accuracy | sigmoid | 10 | 0.70 | 3.48 ± 1.30 | 5.35 ± 2.31 | 15.8% |
+| Low coverage | sigmoid | 5 | 0.70 | 3.61 ± 1.75 | 5.88 ± 3.36 | 8.0% |
+| Balanced | sigmoid | 15 | 0.70 | 3.93 ± 1.17 | 5.84 ± 1.78 | 21.7% |
+| High coverage | sigmoid | 30 | 0.70 | 4.97 ± 0.98 | 7.43 | 32.8% |
 
 **Parameter effects:**
 - **Scale**: Lower = more selective (tighter agreement required)
 - **Threshold**: Higher = more selective (higher accept score required)
-- **Formula**: sqrt is most stable; sigmoid best at extreme selectivity
+- **Formula**: sigmoid now competitive with sqrt
 - **score_function**: 'weighted' (default), 'min' (stricter), 'product' (even stricter)
-- **quality_window**: Window around boom for quality features (default 25, 35 shows promise)
-- **jitter_std**: Training noise for boom estimate (default 5, 10 shows promise)
+- **quality_window**: 35-50 works best with larger datasets (default 25)
+- **jitter_std**: 0 works best with 175+ sims (no augmentation needed)
 
 ```python
 from boom_detection.combine import ThresholdCombiner
 from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
-# Recommended: stable accuracy
+# 2-model (no longer recommended - use 3-model instead)
 pipeline = BoomDetectionPipeline(
     frame_models=('cnn', 'hgb'),
     combiner=ThresholdCombiner(
-        agreement_transform='sqrt',
-        disagreement_scale=15.0,
+        agreement_transform='sigmoid',
+        disagreement_scale=10.0,
         threshold=0.70,
-        primary_model='cnn',
     ),
 )
 ```
 
-### 4.3 3-Model Pipeline (CNN + HGB + LSTM)
+### 4.3 3-Model Pipeline (CNN + HGB + LSTM) - RECOMMENDED
 
-**NOT RECOMMENDED** - Does not improve over 2-model with PRODUCTION_CONFIG.
+**NOW RECOMMENDED** - Best accuracy with 175+ simulations.
 
-Tested with `std` metric (robust to outliers) vs `range` metric:
+The 3-model pipeline uses the standard deviation of predictions (std metric) to measure model agreement. This is more robust to LSTM outliers than the range metric.
 
-| Metric | Scale | Threshold | MAE | Coverage | Notes |
-|--------|-------|-----------|-----|----------|-------|
-| std | sqrt/8 | 0.55 | 5.18 ± 0.78 | 34.4% | High variance |
-| std | sqrt/5 | 0.50 | 5.29 ± 0.85 | 31.5% | |
-| range | sqrt/15 | 0.50 | 5.07 ± 0.64 | 38.9% | |
+| Metric | Scale | Threshold | MAE | MAE std | Coverage |
+|--------|-------|-----------|-----|---------|----------|
+| **std** | **15** | **0.70** | **2.97** | **0.06** | **10.9%** |
+| std | 10 | 0.70 | 2.58 ± 0.69 | | 6.9% |
+| std | 8 | 0.70 | 2.55 ± 0.68 | | 4.4% |
+| range | 20 | 0.70 | 2.53 ± 0.85 | | 5.5% |
 
-**Why 3-model doesn't help:**
-- With PRODUCTION_CONFIG (max_pendulums=2000), LSTM predictions are less stable
-- The additional model adds noise rather than signal to the agreement metric
-- 2-model is simpler and more accurate
+**Why 3-model is now best:**
+- With 175 simulations, LSTM gets more stable training data
+- Using `std` metric (not `range`) filters out LSTM outliers
+- The previous 90-sim conclusion was a small-sample artifact
+
+```python
+from boom_detection.combine import ThresholdCombiner
+from boom_detection.deploy_pipeline import BoomDetectionPipeline
+
+# RECOMMENDED: 3-model pipeline
+pipeline = BoomDetectionPipeline(
+    frame_models=('cnn', 'hgb', 'lstm'),
+    combiner=ThresholdCombiner(
+        agreement_transform='sqrt',
+        disagreement_scale=15.0,
+        disagreement_metric='std',  # IMPORTANT: use std, not range
+        threshold=0.70,
+    ),
+)
+# Expected: MAE 2.97 ± 0.06 at 10.9% coverage
+```
 
 ### 4.4 Experimental: Specialized Models
 
@@ -177,15 +196,19 @@ from boom_detection.deploy_pipeline import BoomDetectionPipeline
 
 evaluator = CachedEvaluator(dataset, cache)
 
-# Train models ONCE (slow)
+# Train models ONCE (slow) - use 3-model for best results
 experiment = evaluator.create_combiner_experiment(
-    lambda: BoomDetectionPipeline(frame_models=('cnn', 'hgb')),
+    lambda: BoomDetectionPipeline(frame_models=('cnn', 'hgb', 'lstm')),
     seeds=[42, 43, 44],
 )
 
 # Iterate on combiners (FAST - no retraining!)
 for scale in [5, 10, 15, 20]:
-    combiner = ThresholdCombiner(disagreement_scale=scale, threshold=0.60)
+    combiner = ThresholdCombiner(
+        disagreement_scale=scale,
+        disagreement_metric='std',  # Important for 3-model
+        threshold=0.70,
+    )
     result = experiment.evaluate(combiner)
     print(f"scale={scale}: MAE {result.mean_metrics['selective_mae']:.2f}")
 ```
@@ -330,26 +353,24 @@ cache.extract_all(dataset, auto_release=True)  # Frees 35GB automatically
 - **Don't use oracle quality** at inference
 - **Don't commit** `.feature_cache/` or `runs/`
 
-## Key Findings Summary
+## Key Findings Summary (175 simulations)
 
-1. **2-model pipeline is optimal** - sqrt/s=15/t=0.70 gives MAE 2.78 at 11.5%
-2. **Quality-only is competitive** - MAE 3.35 at 12.2%, much simpler
-3. **3-model does NOT improve** - adds noise with PRODUCTION_CONFIG
+1. **3-model pipeline is now optimal** - std/s=15/t=0.70 gives MAE 2.97 at 10.9%
+2. **2-model is no longer best** - MAE 3.48 vs 3-model's 2.97 (15% worse)
+3. **Quality-only is competitive** - MAE 3.54 at 14.5%, much simpler
 4. **Specialized models don't help** - baseline + quality gating is best
-5. **LSTM is best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
-6. **Caustic features don't help** - PRODUCTION_CONFIG excludes them
-7. **LSTM+HGB pipeline is worse** - 50% worse MAE than CNN+HGB despite LSTM being best individual model
+5. **Caustic features don't help** - PRODUCTION_CONFIG excludes them
+6. **Quality params with more data**: window=50, jitter=0 (no augmentation needed)
 
-## Promising Results (Pending Validation)
+## What Changed from 90 to 175 Simulations
 
-These results show improvement but have < 10% coverage. Need validation on larger dataset.
-See `EXPERIMENTS.md` for full details.
+| Finding | 90-sim | 175-sim |
+|---------|--------|---------|
+| Best approach | 2-model | **3-model** |
+| 2-model MAE | 2.78 | 3.48 (worse) |
+| 3-model MAE | 5.18 | **2.97** (now best) |
+| Best quality params | window=35, jitter=10 | **window=50, jitter=0** |
 
-| Config | MAE | Coverage | Notes |
-|--------|-----|----------|-------|
-| quality_window=35, jitter_std=10 + sqrt/s=15/t=0.70 | 2.70 ± 0.34 | 8.1% | 3% MAE improvement |
-| score_function='min', threshold=0.65 | 2.86 ± 1.42 | 9.3% | Alternative approach |
-| primary_model='median' | 2.98 ± 0.41 | 10.0% | Slight improvement |
+**Lesson**: Small datasets can mislead. Always validate with more data before drawing conclusions.
 
-**Key insight**: Quality model parameters (quality_window, jitter_std) have significant impact.
-Combiner transform (sqrt vs sigmoid) matters less.
+See `EXPERIMENTS_175.md` for complete analysis.
