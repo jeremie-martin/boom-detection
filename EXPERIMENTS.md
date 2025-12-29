@@ -131,6 +131,71 @@ Note: This requires retraining (not free like combiner sweeps).
 
 ---
 
+## 2024-12-29: Combined Best Parameters
+
+**Run**: `runs/sweep_combined_best_20251229_231700/`
+
+Tests whether combining best quality params with best combiner settings gives further improvement.
+
+### Configuration
+
+- quality_window=35, jitter_std=10 (best from quality params sweep)
+- Sigmoid transform with scales 5, 10, 15
+- sqrt baseline for comparison
+- score_function='min' alternative
+
+### Results
+
+| Formula | Scale | Threshold | Primary | MAE | Std | Coverage |
+|---------|-------|-----------|---------|-----|-----|----------|
+| sigmoid | 5 | 0.75 | cnn | 2.06 | 0.82 | 3.3% |
+| sigmoid | 5 | 0.75 | median | 2.17 | 0.76 | 3.3% |
+| sqrt | 15 | 0.75 | cnn | 2.60 | 0.40 | 5.2% |
+| sigmoid | 10 | 0.75 | cnn | 2.63 | 0.78 | 5.6% |
+| sqrt | 15 | 0.75 | median | 2.67 | 0.31 | 5.2% |
+| **sqrt** | **15** | **0.70** | **cnn** | **2.70** | **0.34** | **8.1%** |
+| sigmoid | 10 | 0.75 | median | 2.71 | 0.67 | 5.6% |
+| sqrt | 15 | 0.70 | median | 2.72 | 0.50 | 8.1% |
+| sigmoid | 5 | 0.70 | median | 2.75 | 0.44 | 8.1% |
+| sigmoid | 5 | 0.70 | cnn | 2.80 | 0.29 | 8.1% |
+
+### Key Findings
+
+1. **Confirms quality params improvement**: sqrt/s=15/t=0.70 with new quality params gives
+   MAE 2.70 ± 0.34 at 8.1% - matching the quality params sweep result
+
+2. **Sigmoid doesn't add much**: At same coverage (8.1%), sigmoid/s=5/t=0.70 gives
+   MAE 2.75-2.80, slightly worse than sqrt (2.70)
+
+3. **Very high selectivity works**: sigmoid/s=5/t=0.75 gives MAE 2.06 at 3.3% coverage,
+   but this is too few samples to be reliable
+
+4. **Stability preserved**: sqrt/s=15/t=0.70 remains most stable (std 0.34)
+
+### Conclusion
+
+The quality params (window=35, jitter=10) are the key improvement. The combiner transform
+(sqrt vs sigmoid) makes less difference. **Recommended config at 8.1% coverage**:
+
+```python
+BoomDetectionPipeline(
+    frame_models=('cnn', 'hgb'),
+    combiner=ThresholdCombiner(
+        agreement_transform='sqrt',
+        disagreement_scale=15.0,
+        threshold=0.70,
+    ),
+    quality_window=35,
+    jitter_std=10,
+)
+```
+
+**Improvement over previous best**:
+- Previous: MAE 2.78 at 11.5% (default params)
+- New: MAE 2.70 at 8.1% (3% MAE improvement, lower coverage)
+
+---
+
 ## Summary: Promising Configurations to Validate
 
 These configurations show improvement but need validation on a larger dataset:
@@ -139,7 +204,7 @@ These configurations show improvement but need validation on a larger dataset:
 
 | Config | MAE | Coverage | Notes |
 |--------|-----|----------|-------|
-| quality_window=35, jitter_std=10 | 2.70 | 8.1% | Best overall |
+| **Combined best** (quality=35/10 + sqrt/15/0.70) | **2.70** | **8.1%** | Recommended pending validation |
 | sigmoid/s=10/t=0.75 | 2.40 | 7.0% | From combiner sweep |
 | score_function='min', t=0.65 | 2.86 | 9.3% | Alternative approach |
 
@@ -153,8 +218,8 @@ These configurations show improvement but need validation on a larger dataset:
 
 ### Follow-up Experiments Needed
 
-1. **Combine best findings**: quality_window=35, jitter_std=10 WITH sigmoid transform
-2. **Test on larger dataset**: Validate low-coverage results
+1. ~~**Combine best findings**: quality_window=35, jitter_std=10 WITH sigmoid transform~~ **DONE** - sigmoid doesn't add benefit
+2. **Test on larger dataset**: Validate low-coverage results (CRITICAL before changing defaults)
 3. **score_function='min' deeper sweep**: Test more threshold values
 
 ---
