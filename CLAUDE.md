@@ -72,6 +72,9 @@ Uses model agreement to filter predictions. More complex but can achieve better 
 - **Scale**: Lower = more selective (tighter agreement required)
 - **Threshold**: Higher = more selective (higher accept score required)
 - **Formula**: sqrt is most stable; sigmoid best at extreme selectivity
+- **score_function**: 'weighted' (default), 'min' (stricter), 'product' (even stricter)
+- **quality_window**: Window around boom for quality features (default 25, 35 shows promise)
+- **jitter_std**: Training noise for boom estimate (default 5, 10 shows promise)
 
 ```python
 from boom_detection.combine import ThresholdCombiner
@@ -302,6 +305,10 @@ cache.extract_all(dataset, auto_release=True)  # Frees 35GB automatically
 | `sweep_2model.py` | Sweep 2-model ThresholdCombiner parameters |
 | `sweep_3model.py` | Sweep 3-model with std/range metrics |
 | `sweep_specialized.py` | Compare specialized vs baseline models |
+| `sweep_extended.py` | Sweep weights, primary_model, score_function |
+| `sweep_quality_params.py` | Sweep quality_window and jitter_std |
+| `sweep_lstm_hgb.py` | Test LSTM+HGB pipeline (negative result) |
+| `sweep_combined_best.py` | Test combined best parameters |
 | `characterize_acceptance.py` | Validate documented results |
 | `boom_server.py` | Deploy for real-time inference |
 
@@ -331,3 +338,18 @@ cache.extract_all(dataset, auto_release=True)  # Frees 35GB automatically
 4. **Specialized models don't help** - baseline + quality gating is best
 5. **LSTM is best individual model** - MAE 18.3 (vs CNN 20.2, HGB 22.5)
 6. **Caustic features don't help** - PRODUCTION_CONFIG excludes them
+7. **LSTM+HGB pipeline is worse** - 50% worse MAE than CNN+HGB despite LSTM being best individual model
+
+## Promising Results (Pending Validation)
+
+These results show improvement but have < 10% coverage. Need validation on larger dataset.
+See `EXPERIMENTS.md` for full details.
+
+| Config | MAE | Coverage | Notes |
+|--------|-----|----------|-------|
+| quality_window=35, jitter_std=10 + sqrt/s=15/t=0.70 | 2.70 ± 0.34 | 8.1% | 3% MAE improvement |
+| score_function='min', threshold=0.65 | 2.86 ± 1.42 | 9.3% | Alternative approach |
+| primary_model='median' | 2.98 ± 0.41 | 10.0% | Slight improvement |
+
+**Key insight**: Quality model parameters (quality_window, jitter_std) have significant impact.
+Combiner transform (sqrt vs sigmoid) matters less.
