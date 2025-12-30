@@ -22,8 +22,9 @@ Usage:
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import numpy as np
 from scipy import stats
@@ -33,10 +34,10 @@ from .logging_config import logger
 
 # Import core metrics and types (no sklearn dependency)
 from .metrics import (
+    RunArtifact,
     SelectivePrediction,
     compute_all_metrics,
     compute_selective_metrics,
-    RunArtifact,
     mae,
     median_ae,
     rmse,
@@ -45,26 +46,26 @@ from .metrics import (
 # Re-export for convenience
 __all__ = [
     # From metrics (re-exported)
-    'SelectivePrediction',
-    'compute_all_metrics',
-    'compute_selective_metrics',
-    'RunArtifact',
-    'mae',
-    'median_ae',
-    'rmse',
+    "SelectivePrediction",
+    "compute_all_metrics",
+    "compute_selective_metrics",
+    "RunArtifact",
+    "mae",
+    "median_ae",
+    "rmse",
     # CV-specific
-    'FoldResult',
-    'EvaluationResult',
-    'MultiSeedResult',
-    'MultiSeedSelectiveResult',
-    'CachedPredictor',
-    'CachedSelectivePredictor',
-    'CachedEvaluator',
-    'robust_evaluate',
-    'cross_validate',
+    "FoldResult",
+    "EvaluationResult",
+    "MultiSeedResult",
+    "MultiSeedSelectiveResult",
+    "CachedPredictor",
+    "CachedSelectivePredictor",
+    "CachedEvaluator",
+    "robust_evaluate",
+    "cross_validate",
     # Combiner experiment
-    'CachedSample',
-    'CombinerExperiment',
+    "CachedSample",
+    "CombinerExperiment",
 ]
 
 if TYPE_CHECKING:
@@ -76,9 +77,11 @@ if TYPE_CHECKING:
 # Results Containers
 # =============================================================================
 
+
 @dataclass
 class FoldResult:
     """Results from a single fold."""
+
     fold: int
     train_indices: np.ndarray
     test_indices: np.ndarray
@@ -90,6 +93,7 @@ class FoldResult:
 @dataclass
 class EvaluationResult:
     """Complete results from cross-validation."""
+
     task: str  # "frame" or "quality"
     k: int
     seed: int
@@ -126,9 +130,7 @@ class EvaluationResult:
 
         # Compute aggregate metrics on all predictions
         self.aggregate_metrics = compute_all_metrics(
-            self.all_ground_truth,
-            self.all_predictions,
-            task=self.task
+            self.all_ground_truth, self.all_predictions, task=self.task
         )
 
         # Compute mean and std of per-fold metrics
@@ -138,7 +140,7 @@ class EvaluationResult:
             self.metric_means[name] = float(np.mean(values))
             self.metric_stds[name] = float(np.std(values))
 
-    def summary(self, primary_metric: str = 'mae') -> str:
+    def summary(self, primary_metric: str = "mae") -> str:
         """Generate a human-readable summary."""
         lines = [
             f"Cross-Validation Results ({self.k}-fold, seed={self.seed})",
@@ -151,7 +153,7 @@ class EvaluationResult:
         ]
 
         for name, value in sorted(self.aggregate_metrics.items()):
-            if name.startswith('within'):
+            if name.startswith("within"):
                 lines.append(f"  {name}: {value:.1%}")
             else:
                 lines.append(f"  {name}: {value:.3f}")
@@ -161,21 +163,22 @@ class EvaluationResult:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            'task': self.task,
-            'k': self.k,
-            'seed': self.seed,
-            'aggregate_metrics': self.aggregate_metrics,
-            'metric_means': self.metric_means,
-            'metric_stds': self.metric_stds,
-            'predictions': self.all_predictions.tolist(),
-            'ground_truth': self.all_ground_truth.tolist(),
-            'indices': self.all_indices.tolist(),
+            "task": self.task,
+            "k": self.k,
+            "seed": self.seed,
+            "aggregate_metrics": self.aggregate_metrics,
+            "metric_means": self.metric_means,
+            "metric_stds": self.metric_stds,
+            "predictions": self.all_predictions.tolist(),
+            "ground_truth": self.all_ground_truth.tolist(),
+            "indices": self.all_indices.tolist(),
         }
 
 
 # =============================================================================
 # Multi-Seed Results
 # =============================================================================
+
 
 @dataclass
 class MultiSeedResult:
@@ -185,6 +188,7 @@ class MultiSeedResult:
     Provides proper uncertainty estimates (mean +/- std with confidence intervals).
     This is the recommended result format for all experiments.
     """
+
     task: str
     k: int
     seeds: list[int]
@@ -221,7 +225,7 @@ class MultiSeedResult:
                 self.ci_lower[name] = self.mean_metrics[name]
                 self.ci_upper[name] = self.mean_metrics[name]
 
-    def summary(self, primary_metric: str = 'mae') -> str:
+    def summary(self, primary_metric: str = "mae") -> str:
         """Generate summary with confidence intervals."""
         lines = [
             "Robust Cross-Validation Results",
@@ -244,7 +248,7 @@ class MultiSeedResult:
             mean = self.mean_metrics[name]
             std = self.std_metrics[name]
 
-            if name.startswith('within'):
+            if name.startswith("within"):
                 lines.append(f"  {name}: {mean:.1%} +/- {std:.1%}")
             else:
                 lines.append(f"  {name}: {mean:.2f} +/- {std:.2f}")
@@ -254,13 +258,13 @@ class MultiSeedResult:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            'task': self.task,
-            'k': self.k,
-            'seeds': self.seeds,
-            'mean_metrics': self.mean_metrics,
-            'std_metrics': self.std_metrics,
-            'ci_lower': self.ci_lower,
-            'ci_upper': self.ci_upper,
+            "task": self.task,
+            "k": self.k,
+            "seeds": self.seeds,
+            "mean_metrics": self.mean_metrics,
+            "std_metrics": self.std_metrics,
+            "ci_lower": self.ci_lower,
+            "ci_upper": self.ci_upper,
         }
 
 
@@ -272,6 +276,7 @@ class MultiSeedSelectiveResult:
     Provides proper uncertainty estimates for selective metrics like coverage and
     selective_mae separately.
     """
+
     k: int
     seeds: list[int]
     seed_metrics: list[dict[str, float]]
@@ -292,8 +297,11 @@ class MultiSeedSelectiveResult:
         metric_names = list(self.seed_metrics[0].keys())
 
         for name in metric_names:
-            values = [m[name] for m in self.seed_metrics
-                     if not np.isnan(m.get(name, float('nan')))]
+            values = [
+                m[name]
+                for m in self.seed_metrics
+                if not np.isnan(m.get(name, float("nan")))
+            ]
             n = len(values)
 
             if n > 0:
@@ -310,10 +318,10 @@ class MultiSeedSelectiveResult:
                     self.ci_lower[name] = self.mean_metrics[name]
                     self.ci_upper[name] = self.mean_metrics[name]
             else:
-                self.mean_metrics[name] = float('nan')
+                self.mean_metrics[name] = float("nan")
                 self.std_metrics[name] = 0.0
-                self.ci_lower[name] = float('nan')
-                self.ci_upper[name] = float('nan')
+                self.ci_lower[name] = float("nan")
+                self.ci_upper[name] = float("nan")
 
     def summary(self) -> str:
         """Generate summary with confidence intervals."""
@@ -326,21 +334,23 @@ class MultiSeedSelectiveResult:
         ]
 
         # Primary metrics
-        if 'selective_mae' in self.mean_metrics:
-            mae_val = self.mean_metrics['selective_mae']
-            mae_std = self.std_metrics.get('selective_mae', 0)
+        if "selective_mae" in self.mean_metrics:
+            mae_val = self.mean_metrics["selective_mae"]
+            mae_std = self.std_metrics.get("selective_mae", 0)
             lines.append(f"Selective MAE: {mae_val:.2f} +/- {mae_std:.2f}")
-            lines.append(f"  95% CI: [{self.ci_lower.get('selective_mae', mae_val):.2f}, "
-                        f"{self.ci_upper.get('selective_mae', mae_val):.2f}]")
+            lines.append(
+                f"  95% CI: [{self.ci_lower.get('selective_mae', mae_val):.2f}, "
+                f"{self.ci_upper.get('selective_mae', mae_val):.2f}]"
+            )
 
-        if 'selective_rmse' in self.mean_metrics:
-            rmse_val = self.mean_metrics['selective_rmse']
-            rmse_std = self.std_metrics.get('selective_rmse', 0)
+        if "selective_rmse" in self.mean_metrics:
+            rmse_val = self.mean_metrics["selective_rmse"]
+            rmse_std = self.std_metrics.get("selective_rmse", 0)
             lines.append(f"Selective RMSE: {rmse_val:.2f} +/- {rmse_std:.2f}")
 
-        if 'coverage' in self.mean_metrics:
-            cov = self.mean_metrics['coverage']
-            cov_std = self.std_metrics.get('coverage', 0)
+        if "coverage" in self.mean_metrics:
+            cov = self.mean_metrics["coverage"]
+            cov_std = self.std_metrics.get("coverage", 0)
             lines.append(f"Coverage: {cov:.1%} +/- {cov_std:.1%}")
 
         lines.append("")
@@ -352,9 +362,9 @@ class MultiSeedSelectiveResult:
 
             if np.isnan(mean):
                 lines.append(f"  {name}: N/A")
-            elif name.startswith('selective_within') or name == 'coverage':
+            elif name.startswith("selective_within") or name == "coverage":
                 lines.append(f"  {name}: {mean:.1%} +/- {std:.1%}")
-            elif name in ('n_total', 'n_accepted'):
+            elif name in ("n_total", "n_accepted"):
                 lines.append(f"  {name}: {mean:.0f}")
             else:
                 lines.append(f"  {name}: {mean:.2f} +/- {std:.2f}")
@@ -364,19 +374,20 @@ class MultiSeedSelectiveResult:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            'k': self.k,
-            'seeds': self.seeds,
-            'mean_metrics': self.mean_metrics,
-            'std_metrics': self.std_metrics,
-            'ci_lower': self.ci_lower,
-            'ci_upper': self.ci_upper,
-            'seed_metrics': self.seed_metrics,
+            "k": self.k,
+            "seeds": self.seeds,
+            "mean_metrics": self.mean_metrics,
+            "std_metrics": self.std_metrics,
+            "ci_lower": self.ci_lower,
+            "ci_upper": self.ci_upper,
+            "seed_metrics": self.seed_metrics,
         }
 
 
 # =============================================================================
 # Combiner Experiment Framework
 # =============================================================================
+
 
 @dataclass
 class CachedSample:
@@ -386,6 +397,7 @@ class CachedSample:
     This stores all information needed to apply different combiners
     without retraining or re-running inference.
     """
+
     sim_id: str
     predictions: list  # list[ModelPrediction] from frame models
     predicted_quality: float
@@ -486,22 +498,24 @@ class CombinerExperiment:
 
                 # Get accept_score if available
                 accept_score = 0.0
-                if hasattr(combiner, 'get_score'):
+                if hasattr(combiner, "get_score"):
                     accept_score = combiner.get_score()
                 elif accepted:
                     accept_score = 1.0
 
                 # Compute disagreement
-                dis = compute_disagreement(sample.predictions, metric='range')
+                dis = compute_disagreement(sample.predictions, metric="range")
 
-                selective_predictions.append(SelectivePrediction(
-                    boom_frame=result,
-                    accepted=accepted,
-                    accept_score=float(accept_score),
-                    predicted_quality=sample.predicted_quality,
-                    model_predictions=sample.model_predictions_dict,
-                    disagreement=dis,
-                ))
+                selective_predictions.append(
+                    SelectivePrediction(
+                        boom_frame=result,
+                        accepted=accepted,
+                        accept_score=float(accept_score),
+                        predicted_quality=sample.predicted_quality,
+                        model_predictions=sample.model_predictions_dict,
+                        disagreement=dis,
+                    )
+                )
                 true_booms.append(sample.true_boom)
                 true_qualities.append(sample.true_quality)
 
@@ -515,8 +529,10 @@ class CombinerExperiment:
 
             if verbose:
                 n_accepted = sum(1 for p in selective_predictions if p.accepted)
-                print(f"  Seed {self.seeds[seed_idx]}: {n_accepted}/{len(selective_predictions)} accepted, "
-                      f"MAE={metrics.get('selective_mae', float('nan')):.2f}")
+                print(
+                    f"  Seed {self.seeds[seed_idx]}: {n_accepted}/{len(selective_predictions)} accepted, "
+                    f"MAE={metrics.get('selective_mae', float('nan')):.2f}"
+                )
 
         return MultiSeedSelectiveResult(
             k=self.k,
@@ -565,11 +581,13 @@ class CombinerExperiment:
             results[key] = result
 
             if verbose:
-                mae = result.mean_metrics.get('selective_mae', float('nan'))
-                mae_std = result.std_metrics.get('selective_mae', 0)
-                cov = result.mean_metrics.get('coverage', 0)
-                print(f"  [{count}/{total}] {key}: "
-                      f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage")
+                mae = result.mean_metrics.get("selective_mae", float("nan"))
+                mae_std = result.std_metrics.get("selective_mae", 0)
+                cov = result.mean_metrics.get("coverage", 0)
+                print(
+                    f"  [{count}/{total}] {key}: "
+                    f"MAE {mae:.2f} +/- {mae_std:.2f} at {cov:.1%} coverage"
+                )
 
         return results
 
@@ -577,6 +595,7 @@ class CombinerExperiment:
 # =============================================================================
 # Predictor Protocols
 # =============================================================================
+
 
 class CachedPredictor(Protocol):
     """
@@ -589,19 +608,12 @@ class CachedPredictor(Protocol):
     """
 
     def fit(
-        self,
-        sim_ids: list[str],
-        targets: np.ndarray,
-        cache: 'FeatureCache'
+        self, sim_ids: list[str], targets: np.ndarray, cache: "FeatureCache"
     ) -> None:
         """Fit the model on training data."""
         ...
 
-    def predict(
-        self,
-        sim_ids: list[str],
-        cache: 'FeatureCache'
-    ) -> np.ndarray:
+    def predict(self, sim_ids: list[str], cache: "FeatureCache") -> np.ndarray:
         """Predict on new simulations."""
         ...
 
@@ -618,15 +630,13 @@ class CachedSelectivePredictor(Protocol):
         sim_ids: list[str],
         boom_frames: np.ndarray,
         qualities: np.ndarray,
-        cache: 'FeatureCache'
+        cache: "FeatureCache",
     ) -> None:
         """Fit the model on training data (requires quality scores)."""
         ...
 
     def predict(
-        self,
-        sim_ids: list[str],
-        cache: 'FeatureCache'
+        self, sim_ids: list[str], cache: "FeatureCache"
     ) -> list[SelectivePrediction]:
         """Predict with abstention for simulations."""
         ...
@@ -635,6 +645,7 @@ class CachedSelectivePredictor(Protocol):
 # =============================================================================
 # CachedEvaluator - The One Blessed Evaluator
 # =============================================================================
+
 
 class CachedEvaluator:
     """
@@ -660,7 +671,7 @@ class CachedEvaluator:
         print(result.summary())
     """
 
-    def __init__(self, dataset: 'Dataset', cache: 'FeatureCache'):
+    def __init__(self, dataset: "Dataset", cache: "FeatureCache"):
         """
         Args:
             dataset: Dataset with annotations
@@ -706,8 +717,12 @@ class CachedEvaluator:
         targets = self.boom_frames if task == "frame" else self.boom_qualities
         seed_results = []
 
-        logger.info("Starting {}-fold CV with {} seeds on {} samples",
-                   k, len(seeds), len(self.sim_ids))
+        logger.info(
+            "Starting {}-fold CV with {} seeds on {} samples",
+            k,
+            len(seeds),
+            len(self.sim_ids),
+        )
         total_start = time.time()
 
         for seed_idx, seed in enumerate(seeds):
@@ -716,13 +731,22 @@ class CachedEvaluator:
 
             # Run single-seed CV
             result = self._cross_validate_single_seed(
-                predictor_fn, k=k, seed=seed, targets=targets, task=task, verbose=verbose
+                predictor_fn,
+                k=k,
+                seed=seed,
+                targets=targets,
+                task=task,
+                verbose=verbose,
             )
             seed_results.append(result)
 
             seed_elapsed = time.time() - seed_start
-            logger.info("Seed {} complete in {:.1f}s (MAE: {:.2f})",
-                       seed, seed_elapsed, result.aggregate_metrics['mae'])
+            logger.info(
+                "Seed {} complete in {:.1f}s (MAE: {:.2f})",
+                seed,
+                seed_elapsed,
+                result.aggregate_metrics["mae"],
+            )
 
         multi_result = MultiSeedResult(
             task=task,
@@ -731,12 +755,15 @@ class CachedEvaluator:
             seed_results=seed_results,
         )
 
-        if verbose:
-            print(f"\n{'='*60}")
-            print("SUMMARY")
-            print('='*60)
-            print(f"MAE: {multi_result.mean_metrics['mae']:.2f} +/- {multi_result.std_metrics['mae']:.2f}")
-            print(f"95% CI: [{multi_result.ci_lower['mae']:.2f}, {multi_result.ci_upper['mae']:.2f}]")
+        logger.debug(f"\n{'=' * 60}")
+        logger.debug("SUMMARY")
+        logger.debug("=" * 60)
+        logger.debug(
+            f"MAE: {multi_result.mean_metrics['mae']:.2f} +/- {multi_result.std_metrics['mae']:.2f}"
+        )
+        logger.debug(
+            f"95% CI: [{multi_result.ci_lower['mae']:.2f}, {multi_result.ci_upper['mae']:.2f}]"
+        )
 
         return multi_result
 
@@ -766,11 +793,16 @@ class CachedEvaluator:
             test_y = targets[test_idx]
 
             # Create fresh predictor and train
-            logger.debug("  Fold {}/{}: training on {} samples...", fold_idx + 1, k, len(train_ids))
+            logger.debug(
+                "  Fold {}/{}: training on {} samples...",
+                fold_idx + 1,
+                k,
+                len(train_ids),
+            )
             predictor = predictor_fn()
 
             # Pass fold seed if the predictor supports it
-            if hasattr(predictor, 'set_seed'):
+            if hasattr(predictor, "set_seed"):
                 predictor.set_seed(fold_seed)
 
             train_start = time.time()
@@ -786,18 +818,27 @@ class CachedEvaluator:
             # Compute metrics
             metrics = compute_all_metrics(test_y, predictions, task=task)
 
-            fold_results.append(FoldResult(
-                fold=fold_idx,
-                train_indices=train_idx,
-                test_indices=test_idx,
-                predictions=predictions,
-                ground_truth=test_y,
-                metrics=metrics,
-            ))
+            fold_results.append(
+                FoldResult(
+                    fold=fold_idx,
+                    train_indices=train_idx,
+                    test_indices=test_idx,
+                    predictions=predictions,
+                    ground_truth=test_y,
+                    metrics=metrics,
+                )
+            )
 
             fold_elapsed = time.time() - fold_start
-            logger.debug("  Fold {}/{}: MAE={:.2f} (train: {:.1f}s, pred: {:.1f}s, total: {:.1f}s)",
-                        fold_idx + 1, k, metrics['mae'], train_time, pred_time, fold_elapsed)
+            logger.debug(
+                "  Fold {}/{}: MAE={:.2f} (train: {:.1f}s, pred: {:.1f}s, total: {:.1f}s)",
+                fold_idx + 1,
+                k,
+                metrics["mae"],
+                train_time,
+                pred_time,
+                fold_elapsed,
+            )
 
         return EvaluationResult(
             task=task,
@@ -846,6 +887,8 @@ class CachedEvaluator:
         k: int = 5,
         seeds: list[int] | None = None,
         verbose: bool = True,
+        parallel: bool = True,
+        max_workers: int | None = None,
     ) -> MultiSeedSelectiveResult:
         """
         Run robust multi-seed cross-validation for selective (abstaining) predictors.
@@ -861,6 +904,8 @@ class CachedEvaluator:
             k: Number of folds (default: 5)
             seeds: List of random seeds (default: [42, 43, 44, 45, 46])
             verbose: Print progress
+            parallel: Run seeds in parallel (default: True)
+            max_workers: Max parallel workers (default: min(len(seeds), 3))
 
         Returns:
             MultiSeedSelectiveResult with uncertainty estimates
@@ -868,19 +913,22 @@ class CachedEvaluator:
         if seeds is None:
             seeds = [42, 43, 44, 45, 46]  # 5 seeds by default
 
-        all_seed_metrics = []
-
-        for seed_idx, seed in enumerate(seeds):
-            if verbose:
-                print(f"\n{'='*50}")
-                print(f"Seed {seed} ({seed_idx + 1}/{len(seeds)})")
-                print('='*50)
-
-            # Run single-seed CV
-            metrics = self._cross_validate_selective_single_seed(
-                predictor_fn, k=k, seed=seed, verbose=verbose
+        if parallel and len(seeds) > 1:
+            all_seed_metrics = self._cross_validate_parallel(
+                predictor_fn, k=k, seeds=seeds, verbose=verbose, max_workers=max_workers
             )
-            all_seed_metrics.append(metrics)
+        else:
+            all_seed_metrics = []
+            for seed_idx, seed in enumerate(seeds):
+                if verbose:
+                    print(f"\n{'=' * 50}")
+                    print(f"Seed {seed} ({seed_idx + 1}/{len(seeds)})")
+                    print("=" * 50)
+
+                metrics = self._cross_validate_selective_single_seed(
+                    predictor_fn, k=k, seed=seed, verbose=verbose
+                )
+                all_seed_metrics.append(metrics)
 
         result = MultiSeedSelectiveResult(
             k=k,
@@ -889,20 +937,66 @@ class CachedEvaluator:
         )
 
         if verbose:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("SUMMARY")
-            print('='*60)
-            mae_val = result.mean_metrics.get('selective_mae', float('nan'))
-            mae_std = result.std_metrics.get('selective_mae', 0)
-            rmse_val = result.mean_metrics.get('selective_rmse', float('nan'))
-            rmse_std = result.std_metrics.get('selective_rmse', 0)
-            cov = result.mean_metrics.get('coverage', 0)
-            cov_std = result.std_metrics.get('coverage', 0)
+            print("=" * 60)
+            mae_val = result.mean_metrics.get("selective_mae", float("nan"))
+            mae_std = result.std_metrics.get("selective_mae", 0)
+            rmse_val = result.mean_metrics.get("selective_rmse", float("nan"))
+            rmse_std = result.std_metrics.get("selective_rmse", 0)
+            cov = result.mean_metrics.get("coverage", 0)
+            cov_std = result.std_metrics.get("coverage", 0)
             print(f"Selective MAE: {mae_val:.2f} +/- {mae_std:.2f}")
             print(f"Selective RMSE: {rmse_val:.2f} +/- {rmse_std:.2f}")
             print(f"Coverage: {cov:.1%} +/- {cov_std:.1%}")
 
         return result
+
+    def _cross_validate_parallel(
+        self,
+        predictor_fn: Callable[[], CachedSelectivePredictor],
+        k: int,
+        seeds: list[int],
+        verbose: bool,
+        max_workers: int | None = None,
+    ) -> list[dict[str, float]]:
+        """Run cross-validation for multiple seeds in parallel."""
+        if max_workers is None:
+            # Limit workers to avoid GPU memory issues
+            max_workers = min(len(seeds), 3)
+
+        # Results will be collected here, indexed by seed
+        results: dict[int, dict[str, float]] = {}
+
+        def run_seed(seed_idx: int, seed: int) -> tuple[int, dict[str, float]]:
+            """Run CV for a single seed."""
+            metrics = self._cross_validate_selective_single_seed(
+                predictor_fn, k=k, seed=seed, verbose=False
+            )
+            return seed_idx, metrics
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(run_seed, idx, seed): (idx, seed)
+                for idx, seed in enumerate(seeds)
+            }
+
+            for future in as_completed(futures):
+                idx, seed = futures[future]
+                try:
+                    seed_idx, metrics = future.result()
+                    results[seed_idx] = metrics
+                    if verbose:
+                        n_accepted = metrics.get("n_accepted", 0)
+                        n_total = metrics.get("n_total", 0)
+                        mae_val = metrics.get("selective_mae", float("nan"))
+                        print(f"  Seed {seed} complete: {n_accepted}/{n_total} accepted, MAE={mae_val:.2f}")
+                except Exception as e:
+                    logger.error("Seed {} failed: {}", seed, e)
+                    raise
+
+        # Return in original seed order
+        return [results[i] for i in range(len(seeds))]
 
     def _cross_validate_selective_single_seed(
         self,
@@ -931,7 +1025,7 @@ class CachedEvaluator:
             predictor = predictor_fn()
 
             # Pass fold seed if the predictor supports it
-            if hasattr(predictor, 'set_seed'):
+            if hasattr(predictor, "set_seed"):
                 predictor.set_seed(fold_seed)
 
             predictor.fit(train_ids, train_booms, train_quals, self.cache)
@@ -950,10 +1044,15 @@ class CachedEvaluator:
             all_true_quals.extend(self.boom_qualities[test_idx].tolist())
 
             if verbose:
-                n_accepted = sum(1 for p in predictions
-                               if (isinstance(p, SelectivePrediction) and p.accepted)
-                               or (isinstance(p, dict) and p.get('accepted', False)))
-                print(f"  Fold {fold_idx + 1}/{k}: {n_accepted}/{len(predictions)} accepted")
+                n_accepted = sum(
+                    1
+                    for p in predictions
+                    if (isinstance(p, SelectivePrediction) and p.accepted)
+                    or (isinstance(p, dict) and p.get("accepted", False))
+                )
+                print(
+                    f"  Fold {fold_idx + 1}/{k}: {n_accepted}/{len(predictions)} accepted"
+                )
 
         # Compute metrics using unified framework
         metrics = compute_selective_metrics(
@@ -1036,9 +1135,9 @@ class CachedEvaluator:
 
         for seed_idx, seed in enumerate(seeds):
             if verbose:
-                print(f"\n{'='*50}")
+                print(f"\n{'=' * 50}")
                 print(f"Training seed {seed} ({seed_idx + 1}/{len(seeds)})")
-                print('='*50)
+                print("=" * 50)
 
             seed_samples: list[CachedSample] = []
             kf = KFold(n_splits=k, shuffle=True, random_state=seed)
@@ -1057,7 +1156,7 @@ class CachedEvaluator:
                 predictor = pipeline_factory()
 
                 # Pass fold seed if the predictor supports it
-                if hasattr(predictor, 'set_seed'):
+                if hasattr(predictor, "set_seed"):
                     predictor.set_seed(fold_seed)
 
                 predictor.fit(train_ids, train_booms, train_quals, self.cache)
@@ -1078,28 +1177,34 @@ class CachedEvaluator:
                         for name, frame in sp.model_predictions.items()
                     ]
 
-                    seed_samples.append(CachedSample(
-                        sim_id=self.sim_ids[test_i],
-                        predictions=model_preds,
-                        predicted_quality=sp.predicted_quality,
-                        true_boom=int(self.boom_frames[test_i]),
-                        true_quality=float(self.boom_qualities[test_i]),
-                    ))
+                    seed_samples.append(
+                        CachedSample(
+                            sim_id=self.sim_ids[test_i],
+                            predictions=model_preds,
+                            predicted_quality=sp.predicted_quality,
+                            true_boom=int(self.boom_frames[test_i]),
+                            true_quality=float(self.boom_qualities[test_i]),
+                        )
+                    )
 
                 fold_elapsed = time.time() - fold_start
                 if verbose:
-                    print(f"  Fold {fold_idx + 1}/{k}: {len(predictions)} predictions ({fold_elapsed:.1f}s)")
+                    print(
+                        f"  Fold {fold_idx + 1}/{k}: {len(predictions)} predictions ({fold_elapsed:.1f}s)"
+                    )
 
             all_cached_samples.append(seed_samples)
 
         total_elapsed = time.time() - total_start
         if verbose:
             total_preds = sum(len(sp) for sp in all_cached_samples)
-            print(f"\n{'='*50}")
+            print(f"\n{'=' * 50}")
             print(f"Training complete in {total_elapsed:.1f}s")
-            print(f"Cached {total_preds} samples ({len(seeds)} seeds x ~{len(self.sim_ids)} sims)")
+            print(
+                f"Cached {total_preds} samples ({len(seeds)} seeds x ~{len(self.sim_ids)} sims)"
+            )
             print("Now you can iterate on combiners WITHOUT retraining!")
-            print('='*50)
+            print("=" * 50)
 
         return CombinerExperiment(
             cached_samples=all_cached_samples,
@@ -1112,9 +1217,10 @@ class CachedEvaluator:
 # Convenience Functions
 # =============================================================================
 
+
 def cross_validate(
-    dataset: 'Dataset',
-    cache: 'FeatureCache',
+    dataset: "Dataset",
+    cache: "FeatureCache",
     predictor_fn: Callable[[], CachedPredictor],
     k: int = 5,
     seeds: list[int] | None = None,
@@ -1132,9 +1238,9 @@ def cross_validate(
 
 
 def robust_evaluate(
-    cache: 'FeatureCache',
+    cache: "FeatureCache",
     predictor_fn: Callable[[], CachedPredictor],
-    data_path: str = 'data',
+    data_path: str = "data",
     k: int = 5,
     seeds: list[int] | None = None,
     task: str = "frame",
@@ -1160,12 +1266,13 @@ def robust_evaluate(
     Returns:
         MultiSeedResult with mean +/- std +/- CI
     """
-    from .loader import load_annotations
     import os
+
+    from .loader import load_annotations
 
     # Load annotations
     if os.path.isdir(data_path):
-        ann_path = os.path.join(data_path, 'annotations.json')
+        ann_path = os.path.join(data_path, "annotations.json")
     else:
         ann_path = data_path
     annotations = load_annotations(ann_path)

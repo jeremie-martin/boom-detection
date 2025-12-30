@@ -27,19 +27,24 @@ from torch.utils.data import Dataset, DataLoader
 from .features import FeatureCache
 
 
-def set_global_seed(seed: int) -> None:
+def set_global_seed(seed: int, deterministic: bool = True) -> None:
     """Set random seeds for reproducibility across all libraries.
 
     Call this before training to ensure reproducible results.
+
+    Args:
+        seed: Random seed for all libraries.
+        deterministic: If True (default), enables cuDNN determinism for exact
+            reproducibility but may slow down training. If False, allows cuDNN
+            to use faster non-deterministic algorithms.
     """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        # These settings ensure determinism but may slow down training
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = not deterministic
 
 
 # =============================================================================
@@ -402,6 +407,10 @@ class SequenceTrainer:
         verbose: bool = False,
         seed: int | None = None,
         normalize: bool = False,
+        num_workers: int = 0,
+        pin_memory: bool = True,
+        use_amp: bool = False,
+        deterministic: bool = False,
     ):
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -415,6 +424,12 @@ class SequenceTrainer:
         self.verbose = verbose
         self.seed = seed
         self.normalize = normalize
+        # DataLoader optimization parameters
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory and (self.device.type == 'cuda')
+        # Mixed precision training (AMP) - only on CUDA
+        self.use_amp = use_amp and (self.device.type == 'cuda')
+        self.deterministic = deterministic
         # Normalization statistics (computed during fit)
         self.feature_mean: np.ndarray | None = None
         self.feature_std: np.ndarray | None = None
@@ -428,7 +443,7 @@ class SequenceTrainer:
         """Train the model."""
         # Set seed for reproducibility if provided
         if self.seed is not None:
-            set_global_seed(self.seed)
+            set_global_seed(self.seed, deterministic=self.deterministic)
 
         # Reset model weights
         self._reset_weights()
@@ -453,11 +468,16 @@ class SequenceTrainer:
             batch_size=self.batch_size,
             shuffle=True,
             collate_fn=collate_variable_length,
-            num_workers=0,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
         )
 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.01)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, self.epochs)
+
+        # Mixed precision training setup
+        scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
 
         best_loss = float('inf')
         patience_counter = 0
@@ -466,20 +486,33 @@ class SequenceTrainer:
         for epoch in range(self.epochs):
             epoch_loss = 0.0
             for features, labels, masks, _ in loader:
-                features = features.to(self.device)
-                labels = labels.to(self.device)
-                masks = masks.to(self.device)
+                # Non-blocking transfers when using pinned memory
+                features = features.to(self.device, non_blocking=self.pin_memory)
+                labels = labels.to(self.device, non_blocking=self.pin_memory)
+                masks = masks.to(self.device, non_blocking=self.pin_memory)
 
-                optimizer.zero_grad()
-                logits = self.model(features)  # (batch, frames)
+                optimizer.zero_grad(set_to_none=True)
 
-                # Masked BCE loss
-                loss = F.binary_cross_entropy_with_logits(
-                    logits[masks], labels[masks]
-                )
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                optimizer.step()
+                # Forward pass with optional AMP
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        logits = self.model(features)
+                        loss = F.binary_cross_entropy_with_logits(
+                            logits[masks], labels[masks]
+                        )
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    logits = self.model(features)
+                    loss = F.binary_cross_entropy_with_logits(
+                        logits[masks], labels[masks]
+                    )
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    optimizer.step()
 
                 epoch_loss += loss.item()
 
