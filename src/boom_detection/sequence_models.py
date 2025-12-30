@@ -236,11 +236,15 @@ class BoomDataset(Dataset):
         boom_frames: np.ndarray,
         cache: FeatureCache,
         augment: bool = False,
+        feature_mean: np.ndarray | None = None,
+        feature_std: np.ndarray | None = None,
     ):
         self.sim_ids = sim_ids
         self.boom_frames = boom_frames
         self.cache = cache
         self.augment = augment
+        self.feature_mean = feature_mean
+        self.feature_std = feature_std
 
     def __len__(self) -> int:
         return len(self.sim_ids)
@@ -248,7 +252,11 @@ class BoomDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, int]:
         sim_id = self.sim_ids[idx]
         boom_frame = int(self.boom_frames[idx])
-        features = self.cache[sim_id]  # (frames, n_features)
+        features = self.cache[sim_id].copy()  # (frames, n_features), copy to avoid modifying cache
+
+        # Apply normalization if statistics are provided
+        if self.feature_mean is not None and self.feature_std is not None:
+            features = (features - self.feature_mean) / self.feature_std
 
         # Data augmentation (returns adjusted boom_frame if time scaling applied)
         if self.augment:
@@ -338,6 +346,7 @@ class SequenceTrainer:
         augment: bool = True,
         verbose: bool = False,
         seed: int | None = None,
+        normalize: bool = False,
     ):
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -350,6 +359,10 @@ class SequenceTrainer:
         self.augment = augment
         self.verbose = verbose
         self.seed = seed
+        self.normalize = normalize
+        # Normalization statistics (computed during fit)
+        self.feature_mean: np.ndarray | None = None
+        self.feature_std: np.ndarray | None = None
 
     def fit(
         self,
@@ -365,7 +378,21 @@ class SequenceTrainer:
         # Reset model weights
         self._reset_weights()
 
-        dataset = BoomDataset(sim_ids, boom_frames, cache, augment=self.augment)
+        # Compute normalization statistics from training data
+        if self.normalize:
+            all_features = []
+            for sid in sim_ids:
+                all_features.append(cache[sid])
+            all_features = np.concatenate(all_features, axis=0)
+            self.feature_mean = np.mean(all_features, axis=0)
+            self.feature_std = np.std(all_features, axis=0)
+            # Prevent division by zero for constant features
+            self.feature_std = np.where(self.feature_std < 1e-8, 1.0, self.feature_std)
+
+        dataset = BoomDataset(
+            sim_ids, boom_frames, cache, augment=self.augment,
+            feature_mean=self.feature_mean, feature_std=self.feature_std,
+        )
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -428,7 +455,12 @@ class SequenceTrainer:
 
         with torch.no_grad():
             for sim_id in sim_ids:
-                features = cache[sim_id]
+                features = cache[sim_id].copy()
+
+                # Apply same normalization as training
+                if self.normalize and self.feature_mean is not None and self.feature_std is not None:
+                    features = (features - self.feature_mean) / self.feature_std
+
                 features_t = torch.from_numpy(features.astype(np.float32)).unsqueeze(0)
                 features_t = features_t.to(self.device)
 

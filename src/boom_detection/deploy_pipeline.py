@@ -101,6 +101,7 @@ class BoomDetectionPipeline:
         feature_config: FeatureConfig | None = None,
         jitter_std: float = 5.0,
         use_class_weights: bool = False,
+        normalize_features: bool = False,
     ):
         """
         Initialize boom detection pipeline.
@@ -124,6 +125,8 @@ class BoomDetectionPipeline:
                        Simulates prediction noise to prevent train/inference mismatch.
             use_class_weights: Apply class weights to HGB training to address imbalance
                               between before-boom and after-boom frames (default: False).
+            normalize_features: Normalize features for neural networks (CNN, LSTM) to zero
+                               mean and unit variance. Statistics computed on training set.
         """
         # Normalize frame_models to FrameModelConfig instances
         self.model_configs = normalize_model_configs(frame_models)
@@ -162,6 +165,7 @@ class BoomDetectionPipeline:
         self.feature_config = feature_config if feature_config is not None else PRODUCTION_CONFIG
         self.jitter_std = jitter_std
         self.use_class_weights = use_class_weights
+        self.normalize_features = normalize_features
 
         # Trained models (set during fit)
         # Key is the model's unique key (e.g., 'cnn', 'hgb', 'hgb_0.5')
@@ -255,7 +259,7 @@ class BoomDetectionPipeline:
         )
         trainer = SequenceTrainer(
             model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
-            seed=seed,
+            seed=seed, normalize=self.normalize_features,
         )
         trainer.fit(sim_ids, boom_frames, cache)
         self.trained_models[model_key] = model
@@ -274,7 +278,7 @@ class BoomDetectionPipeline:
         )
         trainer = SequenceTrainer(
             model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
-            seed=seed,
+            seed=seed, normalize=self.normalize_features,
         )
         trainer.fit(sim_ids, boom_frames, cache)
         self.trained_models[model_key] = model
@@ -454,6 +458,11 @@ class BoomDetectionPipeline:
         # Check if it's a PyTorch model (has trainer) - works for both base and specialized models
         if model_name in self.trainers:
             trainer = self.trainers[model_name]
+
+            # Apply normalization if trainer has it enabled
+            if trainer.normalize and trainer.feature_mean is not None and trainer.feature_std is not None:
+                features = (features - trainer.feature_mean) / trainer.feature_std
+
             model.eval()
             with torch.no_grad():
                 feats_t = torch.from_numpy(features.astype(np.float32)).unsqueeze(0)
