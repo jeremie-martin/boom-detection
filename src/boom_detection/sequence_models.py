@@ -166,6 +166,61 @@ class LSTMClassifier(nn.Module):
         return x.squeeze(-1)  # (batch, frames)
 
 
+class GRUClassifier(nn.Module):
+    """
+    Bidirectional GRU for frame-level classification.
+
+    Similar to LSTM but with fewer parameters (no separate cell state).
+    GRU combines forget and input gates into a single "update gate".
+    Often trains faster than LSTM with comparable performance.
+    """
+
+    def __init__(
+        self,
+        n_features: int,
+        hidden_dim: int = 128,
+        n_layers: int = 2,
+        dropout: float = 0.3,
+    ):
+        super().__init__()
+        self.n_features = n_features
+
+        # Input projection
+        self.input_proj = nn.Linear(n_features, hidden_dim)
+
+        # Bidirectional GRU
+        self.gru = nn.GRU(
+            hidden_dim,
+            hidden_dim // 2,  # Half for each direction
+            n_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if n_layers > 1 else 0,
+        )
+
+        # Output layers
+        self.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, frames, features)
+
+        Returns:
+            (batch, frames) - logits for each frame
+        """
+        x = self.input_proj(x)  # (batch, frames, hidden_dim)
+        x, _ = self.gru(x)  # (batch, frames, hidden_dim)
+        x = self.fc(x)  # (batch, frames, 1)
+        return x.squeeze(-1)  # (batch, frames)
+
+
 class TransformerClassifier(nn.Module):
     """
     Transformer encoder for frame-level classification.
@@ -508,6 +563,11 @@ def get_sequence_models(n_features: int) -> dict[str, SequenceTrainer]:
         ),
         'lstm_classifier': SequenceTrainer(
             LSTMClassifier(n_features),
+            epochs=50,
+            patience=10,
+        ),
+        'gru_classifier': SequenceTrainer(
+            GRUClassifier(n_features),
             epochs=50,
             patience=10,
         ),

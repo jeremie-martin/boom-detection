@@ -46,7 +46,7 @@ from .loader import load_dataset
 from .features import FeatureCache, FeatureConfig, PRODUCTION_CONFIG
 from .logging_config import logger
 from .metrics import SelectivePrediction
-from .sequence_models import CNNClassifier, LSTMClassifier, SequenceTrainer
+from .sequence_models import CNNClassifier, LSTMClassifier, GRUClassifier, SequenceTrainer
 from .combine import (
     ModelPrediction,
     ThresholdCombiner,
@@ -60,7 +60,7 @@ from .combine import (
 )
 
 # Valid frame model types
-VALID_MODEL_TYPES = ('cnn', 'hgb', 'lstm')
+VALID_MODEL_TYPES = ('cnn', 'hgb', 'lstm', 'gru')
 
 
 class BoomDetectionPipeline:
@@ -81,6 +81,9 @@ class BoomDetectionPipeline:
 
         # 3-model with LSTM
         BoomDetectionPipeline(frame_models=('cnn', 'hgb', 'lstm'))
+
+        # 3-model with GRU (alternative to LSTM)
+        BoomDetectionPipeline(frame_models=('cnn', 'hgb', 'gru'))
 
         # Specialized HGB trained on high-quality data only
         BoomDetectionPipeline(frame_models=(
@@ -240,6 +243,8 @@ class BoomDetectionPipeline:
                 self._train_hgb(config.key, train_sim_ids, train_booms, cache, model_seed)
             elif config.model_type == 'lstm':
                 self._train_lstm(config.key, train_sim_ids, train_booms, cache, model_seed)
+            elif config.model_type == 'gru':
+                self._train_gru(config.key, train_sim_ids, train_booms, cache, model_seed)
 
         # Train quality predictor
         quality_seed = (self.seed + len(self.model_configs) * 1000) if self.seed is not None else 42
@@ -284,6 +289,25 @@ class BoomDetectionPipeline:
         self.trained_models[model_key] = model
         self.trainers[model_key] = trainer
         logger.debug("LSTM '{}' trained in {:.1f}s", model_key, time.time() - start)
+
+    def _train_gru(self, model_key: str, sim_ids, boom_frames, cache, seed):
+        """Train GRU model."""
+        logger.debug("Training GRU '{}'...", model_key)
+        start = time.time()
+        model = GRUClassifier(
+            n_features=self.n_features,
+            hidden_dim=64,  # Match LSTM/CNN hidden_dim for consistency
+            n_layers=2,
+            dropout=0.3,
+        )
+        trainer = SequenceTrainer(
+            model, lr=0.5e-3, epochs=30, patience=5, batch_size=4, augment=False,
+            seed=seed, normalize=self.normalize_features,
+        )
+        trainer.fit(sim_ids, boom_frames, cache)
+        self.trained_models[model_key] = model
+        self.trainers[model_key] = trainer
+        logger.debug("GRU '{}' trained in {:.1f}s", model_key, time.time() - start)
 
     def _train_hgb(self, model_key: str, sim_ids, boom_frames, cache, seed):
         """Train HistGradientBoosting model."""
@@ -524,7 +548,7 @@ class BoomDetectionPipeline:
 
             model = self.trained_models[model_key]
 
-            if config.model_type in ('cnn', 'lstm'):
+            if config.model_type in ('cnn', 'lstm', 'gru'):
                 # PyTorch models - save with architecture params
                 torch.save({
                     'state_dict': model.state_dict(),
@@ -645,7 +669,7 @@ class BoomDetectionPipeline:
             model_key = cfg.key
             model_type = cfg.model_type
 
-            if model_type in ('cnn', 'lstm'):
+            if model_type in ('cnn', 'lstm', 'gru'):
                 model_path = path / f'{model_key}.pt'
                 if not model_path.exists():
                     logger.warning("Model file {} not found, skipping", model_path)
@@ -659,8 +683,15 @@ class BoomDetectionPipeline:
                         kernel_sizes=tuple(checkpoint['kernel_sizes']),
                         dropout=checkpoint.get('dropout', 0.3),
                     )
-                else:  # lstm
+                elif model_type == 'lstm':
                     model = LSTMClassifier(
+                        n_features=checkpoint['n_features'],
+                        hidden_dim=checkpoint['hidden_dim'],
+                        n_layers=checkpoint.get('n_layers', 2),
+                        dropout=checkpoint.get('dropout', 0.3),
+                    )
+                else:  # gru
+                    model = GRUClassifier(
                         n_features=checkpoint['n_features'],
                         hidden_dim=checkpoint['hidden_dim'],
                         n_layers=checkpoint.get('n_layers', 2),
