@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
-from .loader import Simulation, X1, Y1, X2, Y2, TH1, TH2, W1, W2
+from .loader import TH1, TH2, W1, W2, X2, Y2, Simulation
 from .logging_config import logger
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 # =============================================================================
 # Feature Extraction Functions
 # =============================================================================
+
 
 def variance_features(data: np.ndarray) -> np.ndarray:
     """
@@ -172,7 +173,7 @@ def tip_spread_features(data: np.ndarray) -> np.ndarray:
     # Max pairwise distance (approximated via max dist from centroid * 2)
     cx = np.mean(x2, axis=1, keepdims=True)
     cy = np.mean(y2, axis=1, keepdims=True)
-    dist_from_centroid = np.sqrt((x2 - cx)**2 + (y2 - cy)**2)
+    dist_from_centroid = np.sqrt((x2 - cx) ** 2 + (y2 - cy) ** 2)
     max_dist = np.max(dist_from_centroid, axis=1) * 2
     mean_dist = np.mean(dist_from_centroid, axis=1)
 
@@ -224,19 +225,23 @@ def velocity_features(data: np.ndarray) -> np.ndarray:
     w1 = data[:, :, W1]
     w2 = data[:, :, W2]
 
-    return np.stack([
-        np.var(w1, axis=1),
-        np.var(w2, axis=1),
-        np.mean(np.abs(w1), axis=1),
-        np.mean(np.abs(w2), axis=1),
-        np.max(np.abs(w1), axis=1) - np.min(np.abs(w1), axis=1),
-        np.max(np.abs(w2), axis=1) - np.min(np.abs(w2), axis=1),
-    ], axis=1)
+    return np.stack(
+        [
+            np.var(w1, axis=1),
+            np.var(w2, axis=1),
+            np.mean(np.abs(w1), axis=1),
+            np.mean(np.abs(w2), axis=1),
+            np.max(np.abs(w1), axis=1) - np.min(np.abs(w1), axis=1),
+            np.max(np.abs(w2), axis=1) - np.min(np.abs(w2), axis=1),
+        ],
+        axis=1,
+    )
 
 
 # =============================================================================
 # Caustic / Angular Distribution Features
 # =============================================================================
+
 
 def _wrap_2pi(angles: np.ndarray) -> np.ndarray:
     """Wrap angles to [0, 2π)."""
@@ -306,7 +311,9 @@ def _angular_histogram(angles: np.ndarray, n_bins: int = 36) -> np.ndarray:
     frame_indices = np.arange(n_frames)[:, None]  # (frames, 1)
 
     # Use np.add.at for unbuffered in-place addition
-    np.add.at(counts, (np.broadcast_to(frame_indices, bin_indices.shape), bin_indices), 1)
+    np.add.at(
+        counts, (np.broadcast_to(frame_indices, bin_indices.shape), bin_indices), 1
+    )
 
     return counts
 
@@ -327,7 +334,7 @@ def _birthday_corrected_coverage(counts: np.ndarray, n_samples: int) -> np.ndarr
     raw_coverage = occupied / n_bins
 
     # Expected coverage if uniformly random: 1 - (1 - 1/M)^N
-    expected = 1 - (1 - 1/n_bins) ** n_samples
+    expected = 1 - (1 - 1 / n_bins) ** n_samples
 
     if expected > 0.01:
         return np.minimum(1.0, raw_coverage / expected)
@@ -424,7 +431,9 @@ def _dispersion_from_angles(angles: np.ndarray) -> np.ndarray:
     return 1 - R
 
 
-def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy') -> np.ndarray:
+def caustic_features(
+    data: np.ndarray, n_bins: int = 36, formula: str = "legacy"
+) -> np.ndarray:
     """
     Compute caustic/angular distribution features.
 
@@ -466,7 +475,7 @@ def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy'
     th2 = data[:, :, TH2]
     tip_angles = th1 + th2
 
-    if formula == 'legacy':
+    if formula == "legacy":
         # Full 9-feature legacy implementation
         x2 = data[:, :, X2]
         y2 = data[:, :, Y2]
@@ -491,27 +500,36 @@ def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy'
         R2 = _mean_resultant_length(th2)
         org_caust = (1 - R1 * R2) * tip_coverage
 
-        return np.stack([
-            angular_caust, tip_caust, joint_conc, org_caust,
-            th1_caust, th2_caust,
-            tip_coverage, th1_coverage, th2_coverage
-        ], axis=1)
+        return np.stack(
+            [
+                angular_caust,
+                tip_caust,
+                joint_conc,
+                org_caust,
+                th1_caust,
+                th2_caust,
+                tip_coverage,
+                th1_coverage,
+                th2_coverage,
+            ],
+            axis=1,
+        )
 
-    elif formula == 'coverage':
+    elif formula == "coverage":
         # Plain coverage (best single-feature predictor)
         tip_feat = _coverage_from_angles(tip_angles, n_bins)
         th1_feat = _coverage_from_angles(th1, n_bins)
         th2_feat = _coverage_from_angles(th2, n_bins)
         joint = th1_feat * th2_feat
 
-    elif formula == 'dispersion':
+    elif formula == "dispersion":
         # 1 - R (circular dispersion)
         tip_feat = _dispersion_from_angles(tip_angles)
         th1_feat = _dispersion_from_angles(th1)
         th2_feat = _dispersion_from_angles(th2)
         joint = th1_feat * th2_feat
 
-    elif formula == 'entropy':
+    elif formula == "entropy":
         # 1 - normalized_entropy
         tip_hist = _angular_histogram(tip_angles, n_bins)
         th1_hist = _angular_histogram(th1, n_bins)
@@ -521,7 +539,7 @@ def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy'
         th2_feat = _normalized_entropy(th2_hist)
         joint = th1_feat * th2_feat
 
-    elif formula == 'coverage_dispersion':
+    elif formula == "coverage_dispersion":
         # coverage × (1-R) - hybrid of both signals
         tip_cov = _coverage_from_angles(tip_angles, n_bins)
         tip_disp = _dispersion_from_angles(tip_angles)
@@ -538,8 +556,10 @@ def caustic_features(data: np.ndarray, n_bins: int = 36, formula: str = 'legacy'
         joint = th1_feat * th2_feat
 
     else:
-        raise ValueError(f"Unknown caustic formula: {formula}. "
-                        f"Use 'legacy', 'coverage', 'dispersion', 'entropy', or 'coverage_dispersion'")
+        raise ValueError(
+            f"Unknown caustic formula: {formula}. "
+            f"Use 'legacy', 'coverage', 'dispersion', 'entropy', or 'coverage_dispersion'"
+        )
 
     return np.stack([tip_feat, th1_feat, th2_feat, joint], axis=1)
 
@@ -567,6 +587,7 @@ def temporal_derivatives(features: np.ndarray, order: int = 1) -> np.ndarray:
 # Enhanced Temporal Features (Phase 2)
 # =============================================================================
 
+
 def rolling_features(features: np.ndarray, window: int) -> np.ndarray:
     """
     Compute rolling window statistics (mean and std).
@@ -583,11 +604,11 @@ def rolling_features(features: np.ndarray, window: int) -> np.ndarray:
     from scipy.ndimage import uniform_filter1d
 
     # Rolling mean - uniform_filter1d is fully vectorized C code
-    rolling_mean = uniform_filter1d(features, size=window, axis=0, mode='nearest')
+    rolling_mean = uniform_filter1d(features, size=window, axis=0, mode="nearest")
 
     # Rolling std via E[X^2] - E[X]^2
-    rolling_mean_sq = uniform_filter1d(features ** 2, size=window, axis=0, mode='nearest')
-    rolling_var = np.maximum(rolling_mean_sq - rolling_mean ** 2, 0)
+    rolling_mean_sq = uniform_filter1d(features**2, size=window, axis=0, mode="nearest")
+    rolling_var = np.maximum(rolling_mean_sq - rolling_mean**2, 0)
     rolling_std = np.sqrt(rolling_var)
 
     return np.hstack([rolling_mean, rolling_std])
@@ -643,9 +664,11 @@ def relative_features(features: np.ndarray) -> np.ndarray:
 # Feature Extractor Class
 # =============================================================================
 
+
 @dataclass
 class FeatureConfig:
     """Configuration for feature extraction."""
+
     include_variance: bool = True
     include_std: bool = True
     include_iqr: bool = True
@@ -659,7 +682,7 @@ class FeatureConfig:
     include_caustic: bool = False  # caustic/angular distribution features
     caustic_bins: int = 36  # number of angular bins (36 = 10° bins)
     # Formula for caustic features: 'legacy' (9 features), 'coverage', 'dispersion', 'entropy', 'coverage_dispersion' (4 features each)
-    caustic_formula: str = 'legacy'
+    caustic_formula: str = "legacy"
     # Specific caustic features to include (if include_caustic=True and formula='legacy')
     # None = all features, or specify subset like ['joint_concentration']
     caustic_subset: tuple[str, ...] | None = None
@@ -684,7 +707,7 @@ DEFAULT_CONFIG = FeatureConfig()
 # Testing shows: No caustic → Selective MAE 5.92 vs All caustic → 6.26
 PRODUCTION_CONFIG = FeatureConfig(
     max_pendulums=2000,
-    include_caustic=False,  # Disabled: helps HGB but hurts full pipeline
+    include_caustic=True,
 )
 
 # Enhanced configuration with temporal features (Phase 2)
@@ -705,30 +728,54 @@ CAUSTIC_CONFIG = FeatureConfig(
 
 # Feature names for each extraction function
 FEATURE_GROUPS = {
-    'variance': ['var_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'std': ['std_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'iqr': ['iqr_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'range': ['range_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'mean': ['mean_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'skewness': ['skew_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'kurtosis': ['kurt_' + n for n in ['x1', 'y1', 'x2', 'y2', 'th1', 'th2', 'w1', 'w2']],
-    'tip_spread': ['tip_area', 'tip_max_dist', 'tip_mean_dist'],
-    'angular_spread': ['th1_spread', 'th2_spread', 'th1_cstd', 'th2_cstd'],
-    'velocity': ['var_w1', 'var_w2', 'mean_abs_w1', 'mean_abs_w2', 'range_abs_w1', 'range_abs_w2'],
+    "variance": [
+        "var_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]
+    ],
+    "std": ["std_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]],
+    "iqr": ["iqr_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]],
+    "range": ["range_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]],
+    "mean": ["mean_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]],
+    "skewness": [
+        "skew_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]
+    ],
+    "kurtosis": [
+        "kurt_" + n for n in ["x1", "y1", "x2", "y2", "th1", "th2", "w1", "w2"]
+    ],
+    "tip_spread": ["tip_area", "tip_max_dist", "tip_mean_dist"],
+    "angular_spread": ["th1_spread", "th2_spread", "th1_cstd", "th2_cstd"],
+    "velocity": [
+        "var_w1",
+        "var_w2",
+        "mean_abs_w1",
+        "mean_abs_w2",
+        "range_abs_w1",
+        "range_abs_w2",
+    ],
     # Legacy caustic features (9 total)
-    'caustic': [
-        'angular_causticness', 'tip_causticness', 'joint_concentration', 'organization_causticness',
-        'th1_causticness', 'th2_causticness',
-        'tip_coverage', 'th1_coverage', 'th2_coverage',
+    "caustic": [
+        "angular_causticness",
+        "tip_causticness",
+        "joint_concentration",
+        "organization_causticness",
+        "th1_causticness",
+        "th2_causticness",
+        "tip_coverage",
+        "th1_coverage",
+        "th2_coverage",
     ],
 }
 
 # Caustic feature names for non-legacy formulas (4 features each)
 CAUSTIC_FORMULA_NAMES = {
-    'coverage': ['cov_tip', 'cov_th1', 'cov_th2', 'cov_joint'],
-    'dispersion': ['disp_tip', 'disp_th1', 'disp_th2', 'disp_joint'],
-    'entropy': ['ent_tip', 'ent_th1', 'ent_th2', 'ent_joint'],
-    'coverage_dispersion': ['covdisp_tip', 'covdisp_th1', 'covdisp_th2', 'covdisp_joint'],
+    "coverage": ["cov_tip", "cov_th1", "cov_th2", "cov_joint"],
+    "dispersion": ["disp_tip", "disp_th1", "disp_th2", "disp_joint"],
+    "entropy": ["ent_tip", "ent_th1", "ent_th2", "ent_joint"],
+    "coverage_dispersion": [
+        "covdisp_tip",
+        "covdisp_th1",
+        "covdisp_th2",
+        "covdisp_joint",
+    ],
 }
 
 
@@ -757,38 +804,38 @@ class FeatureExtractor:
 
         base_groups = []
         if cfg.include_variance:
-            base_groups.append('variance')
+            base_groups.append("variance")
         if cfg.include_std:
-            base_groups.append('std')
+            base_groups.append("std")
         if cfg.include_iqr:
-            base_groups.append('iqr')
+            base_groups.append("iqr")
         if cfg.include_range:
-            base_groups.append('range')
+            base_groups.append("range")
         if cfg.include_mean:
-            base_groups.append('mean')
+            base_groups.append("mean")
         if cfg.include_skewness:
-            base_groups.append('skewness')
+            base_groups.append("skewness")
         if cfg.include_kurtosis:
-            base_groups.append('kurtosis')
+            base_groups.append("kurtosis")
         if cfg.include_tip_spread:
-            base_groups.append('tip_spread')
+            base_groups.append("tip_spread")
         if cfg.include_angular_spread:
-            base_groups.append('angular_spread')
+            base_groups.append("angular_spread")
         if cfg.include_velocity:
-            base_groups.append('velocity')
+            base_groups.append("velocity")
 
         for group in base_groups:
             names.extend(FEATURE_GROUPS[group])
 
         # Handle caustic features with optional subset/formula
         if cfg.include_caustic:
-            if cfg.caustic_formula == 'legacy':
+            if cfg.caustic_formula == "legacy":
                 if cfg.caustic_subset is not None:
                     # Only include specified caustic features
                     names.extend(list(cfg.caustic_subset))
                 else:
                     # Include all legacy caustic features (9)
-                    names.extend(FEATURE_GROUPS['caustic'])
+                    names.extend(FEATURE_GROUPS["caustic"])
             else:
                 # Use formula-specific names (4 features)
                 names.extend(CAUSTIC_FORMULA_NAMES[cfg.caustic_formula])
@@ -864,9 +911,9 @@ class FeatureExtractor:
             features_list.append(velocity_features(data))
         if cfg.include_caustic:
             all_caustic = caustic_features(data, cfg.caustic_bins, cfg.caustic_formula)
-            if cfg.caustic_subset is not None and cfg.caustic_formula == 'legacy':
+            if cfg.caustic_subset is not None and cfg.caustic_formula == "legacy":
                 # Only keep specified caustic features (only works with legacy formula)
-                all_caustic_names = FEATURE_GROUPS['caustic']
+                all_caustic_names = FEATURE_GROUPS["caustic"]
                 indices = [all_caustic_names.index(n) for n in cfg.caustic_subset]
                 features_list.append(all_caustic[:, indices])
             else:
@@ -902,9 +949,7 @@ class FeatureExtractor:
         return base_features
 
     def transform_batch(
-        self,
-        simulations: Sequence[Simulation],
-        verbose: bool = False
+        self, simulations: Sequence[Simulation], verbose: bool = False
     ) -> list[np.ndarray]:
         """
         Extract features from multiple simulations.
@@ -928,9 +973,9 @@ class FeatureExtractor:
 # Convenience Functions
 # =============================================================================
 
+
 def extract_features(
-    simulation: Simulation,
-    config: FeatureConfig | None = None
+    simulation: Simulation, config: FeatureConfig | None = None
 ) -> np.ndarray:
     """
     Extract features from a simulation.
@@ -957,6 +1002,7 @@ def get_feature_names(config: FeatureConfig | None = None) -> list[str]:
 # Feature Cache
 # =============================================================================
 
+
 class FeatureCache:
     """
     Caches extracted features to avoid redundant computation.
@@ -978,7 +1024,9 @@ class FeatureCache:
         features = cache["run_20251226_110631"]
     """
 
-    def __init__(self, config: FeatureConfig | None = None, cache_dir: str | None = None):
+    def __init__(
+        self, config: FeatureConfig | None = None, cache_dir: str | None = None
+    ):
         self.config = config
         self.cache_dir = cache_dir
         self.extractor = FeatureExtractor(config)
@@ -988,6 +1036,7 @@ class FeatureCache:
         # Create cache directory if specified
         if cache_dir:
             import os
+
             os.makedirs(cache_dir, exist_ok=True)
             self._config_hash = self._compute_config_hash()
 
@@ -1047,6 +1096,7 @@ class FeatureCache:
         import hashlib
         import json
         from dataclasses import asdict
+
         config_dict = asdict(self.config) if self.config else {}
         config_str = json.dumps(config_dict, sort_keys=True)
         return hashlib.md5(config_str.encode()).hexdigest()[:8]
@@ -1054,6 +1104,7 @@ class FeatureCache:
     def _get_cache_path(self, sim_id: str) -> str:
         """Get the cache file path for a simulation."""
         import os
+
         # Include config hash to invalidate cache when config changes
         filename = f"{sim_id}_{self._config_hash}.npy"
         return os.path.join(self.cache_dir, filename)
@@ -1063,6 +1114,7 @@ class FeatureCache:
         if not self.cache_dir:
             return None
         import os
+
         path = self._get_cache_path(sim_id)
         if os.path.exists(path):
             return np.load(path)
@@ -1077,7 +1129,7 @@ class FeatureCache:
 
     def extract_all(
         self,
-        dataset: 'Dataset',
+        dataset: "Dataset",
         verbose: bool = True,
         n_jobs: int | None = None,
         auto_release: bool = False,
@@ -1099,8 +1151,8 @@ class FeatureCache:
             auto_release: If True, call dataset.release_simulation_data() after
                 extraction to free ~35GB of memory. Recommended for most use cases.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # First, try to load from disk cache
         loaded_from_disk = 0
@@ -1136,28 +1188,37 @@ class FeatureCache:
             # Each worker holds simulation data (~400MB) in memory during extraction
             n_jobs = min(4, os.cpu_count() or 1, total)
 
-        logger.info("Extracting features for {} simulations using {} workers...", total, n_jobs)
+        logger.info(
+            "Extracting features for {} simulations using {} workers...", total, n_jobs
+        )
         start_time = time.time()
 
         def extract_one(item):
             sim_id, sim = item
             t0 = time.time()
             features = self.extractor.transform(sim)
-            logger.debug("Extracted {} in {:.2f}s: {} frames, {} features",
-                        sim_id, time.time() - t0, features.shape[0], features.shape[1])
+            logger.debug(
+                "Extracted {} in {:.2f}s: {} frames, {} features",
+                sim_id,
+                time.time() - t0,
+                features.shape[0],
+                features.shape[1],
+            )
             return sim_id, features
 
         if n_jobs == 1:
             # Sequential (for debugging)
             for i, (sim_id, sim) in enumerate(to_process):
-                logger.debug("Processing {}/{}: {}", i+1, total, sim_id)
+                logger.debug("Processing {}/{}: {}", i + 1, total, sim_id)
                 features = self.extractor.transform(sim)
                 self._cache[sim_id] = features
                 self._save_to_disk(sim_id, features)
         else:
             # Parallel extraction
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                futures = {executor.submit(extract_one, item): item[0] for item in to_process}
+                futures = {
+                    executor.submit(extract_one, item): item[0] for item in to_process
+                }
                 done = 0
                 for future in as_completed(futures):
                     sim_id, features = future.result()
@@ -1168,17 +1229,27 @@ class FeatureCache:
                         elapsed = time.time() - start_time
                         rate = done / elapsed
                         eta = (total - done) / rate if rate > 0 else 0
-                        logger.info("  {}/{} done ({:.1f}/s, ETA: {:.0f}s)", done, total, rate, eta)
+                        logger.info(
+                            "  {}/{} done ({:.1f}/s, ETA: {:.0f}s)",
+                            done,
+                            total,
+                            rate,
+                            eta,
+                        )
 
         elapsed = time.time() - start_time
-        logger.info("Feature extraction complete: {} simulations in {:.1f}s ({:.2f}s/sim)",
-                   len(self._cache), elapsed, elapsed / total if total > 0 else 0)
+        logger.info(
+            "Feature extraction complete: {} simulations in {:.1f}s ({:.2f}s/sim)",
+            len(self._cache),
+            elapsed,
+            elapsed / total if total > 0 else 0,
+        )
 
         if auto_release:
             dataset.release_simulation_data()
             logger.info("Released raw simulation data to free memory (~35GB)")
 
-    def extract_single(self, sim_id: str, simulation: 'Simulation') -> np.ndarray:
+    def extract_single(self, sim_id: str, simulation: "Simulation") -> np.ndarray:
         """Extract and cache features for a single simulation."""
         if sim_id not in self._cache:
             # Try disk cache first
@@ -1191,7 +1262,9 @@ class FeatureCache:
                 self._save_to_disk(sim_id, features)
         return self._cache[sim_id]
 
-    def load_from_disk(self, sim_ids: list[str] | None = None, verbose: bool = True) -> int:
+    def load_from_disk(
+        self, sim_ids: list[str] | None = None, verbose: bool = True
+    ) -> int:
         """
         Load features from disk cache without needing the dataset.
 
@@ -1205,7 +1278,9 @@ class FeatureCache:
             Number of simulations successfully loaded
         """
         if not self.cache_dir:
-            raise ValueError("No cache_dir specified. Create FeatureCache with cache_dir.")
+            raise ValueError(
+                "No cache_dir specified. Create FeatureCache with cache_dir."
+            )
 
         import os
 
@@ -1215,7 +1290,7 @@ class FeatureCache:
             sim_ids = []
             for filename in os.listdir(self.cache_dir):
                 if filename.endswith(suffix):
-                    sim_id = filename[:-len(suffix)]
+                    sim_id = filename[: -len(suffix)]
                     sim_ids.append(sim_id)
             if verbose:
                 print(f"Discovered {len(sim_ids)} cached simulations")
@@ -1248,7 +1323,9 @@ class FeatureCache:
             if disk_features is not None:
                 self._cache[sim_id] = disk_features
                 return disk_features
-            raise KeyError(f"No cached features for {sim_id}. Call extract_all() first.")
+            raise KeyError(
+                f"No cached features for {sim_id}. Call extract_all() first."
+            )
         return self._cache[sim_id]
 
     def __getitem__(self, sim_id: str) -> np.ndarray:

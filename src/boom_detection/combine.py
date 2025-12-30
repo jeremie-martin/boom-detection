@@ -24,10 +24,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Protocol, Any
+from typing import Any, Protocol
 
 import numpy as np
-
 
 # =============================================================================
 # Core Types
@@ -486,7 +485,8 @@ class QualityGatedCombiner:
         features: np.ndarray | None = None,
     ) -> int | None:
         if predicted_quality >= self.threshold:
-            return median_frame(predictions)
+            # return median_frame(predictions)
+            return mean_frame(predictions)  # TEMP JUST FOR PERF TESTING
         return None
 
     def to_config(self) -> dict:

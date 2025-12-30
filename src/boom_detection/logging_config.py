@@ -20,6 +20,7 @@ For experiment scripts with archival:
     logger.info("Results will be saved to {}", run_dir)
     # All logger output now goes to both terminal AND run_dir/run.log
 """
+
 from __future__ import annotations
 
 import os
@@ -43,6 +44,7 @@ logger.add(
     colorize=True,
 )
 
+
 # Memory monitoring utility
 def log_memory_usage(label: str = "") -> float:
     """
@@ -60,6 +62,7 @@ def log_memory_usage(label: str = "") -> float:
         Current memory usage in GB
     """
     import psutil
+
     mem_gb = psutil.Process(os.getpid()).memory_info().rss / 1e9
     label_str = f" ({label})" if label else ""
     logger.info("Memory usage{}: {:.2f} GB", label_str, mem_gb)
@@ -100,7 +103,7 @@ def setup_run_logging(run_name: str, base_dir: Path | str = Path("runs")) -> Pat
     logger.add(
         log_file,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
-        level="INFO",
+        level="DEBUG",
     )
 
     logger.info("=" * 70)
