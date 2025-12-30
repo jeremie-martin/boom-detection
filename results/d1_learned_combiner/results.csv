@@ -1,0 +1,4 @@
+classifier,mae,mae_std,coverage,coverage_std
+LogisticRegression,11.39,1.19,0.558,0.060
+MLP-small,12.34,0.51,0.549,0.028
+MLP-medium,11.84,0.97,0.510,0.026
