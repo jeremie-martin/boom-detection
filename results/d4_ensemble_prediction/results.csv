@@ -1,0 +1,5 @@
+primary_model,mae,mae_std,rmse,coverage,coverage_std
+cnn,2.97,0.06,4.25,0.109,0.025
+hgb,2.18,0.51,3.41,0.109,0.025
+lstm,2.81,0.22,4.17,0.109,0.025
+median,2.58,0.23,3.87,0.109,0.025
