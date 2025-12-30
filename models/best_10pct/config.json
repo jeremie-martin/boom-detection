@@ -1,0 +1,91 @@
+{
+  "frame_models": [
+    "cnn",
+    "hgb",
+    "lstm"
+  ],
+  "model_configs": [
+    {
+      "model_type": "cnn",
+      "quality_threshold": 0.0
+    },
+    {
+      "model_type": "hgb",
+      "quality_threshold": 0.0
+    },
+    {
+      "model_type": "lstm",
+      "quality_threshold": 0.0
+    }
+  ],
+  "combiner": {
+    "type": "ThresholdCombiner",
+    "params": {
+      "primary_model": "hgb",
+      "threshold": 0.745,
+      "agreement_weight": 0.4,
+      "quality_weight": 0.6,
+      "disagreement_scale": 23.0,
+      "disagreement_metric": "range",
+      "agreement_transform": "sigmoid",
+      "score_function": "weighted"
+    }
+  },
+  "quality_window": 25,
+  "n_quality_features": 50,
+  "n_features": 210,
+  "quality_feature_indices": [
+    82,
+    74,
+    14,
+    6,
+    55,
+    20,
+    90,
+    144,
+    46,
+    44,
+    22,
+    8,
+    0,
+    98,
+    121,
+    118,
+    130,
+    101,
+    16,
+    203,
+    133,
+    165,
+    53,
+    60,
+    85,
+    97,
+    138,
+    149,
+    77,
+    126,
+    4,
+    96,
+    40,
+    197,
+    173,
+    208,
+    31,
+    141,
+    164,
+    12,
+    29,
+    52,
+    128,
+    146,
+    195,
+    73,
+    169,
+    192,
+    209,
+    81
+  ],
+  "calibrate_quality": true,
+  "jitter_std": 5.0
+}

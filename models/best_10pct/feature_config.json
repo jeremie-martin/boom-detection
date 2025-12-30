@@ -1,0 +1,36 @@
+{
+  "include_variance": true,
+  "include_std": true,
+  "include_iqr": true,
+  "include_range": true,
+  "include_mean": false,
+  "include_skewness": true,
+  "include_kurtosis": true,
+  "include_tip_spread": true,
+  "include_angular_spread": true,
+  "include_velocity": true,
+  "include_caustic": true,
+  "caustic_bins": 36,
+  "caustic_formula": "legacy",
+  "caustic_subset": null,
+  "include_derivatives": true,
+  "derivative_orders": [
+    1,
+    2
+  ],
+  "max_pendulums": 2000,
+  "subsample_seed": 42,
+  "include_rolling": false,
+  "rolling_windows": [
+    10,
+    25,
+    50
+  ],
+  "include_lag": false,
+  "lag_steps": [
+    5,
+    10,
+    25
+  ],
+  "include_relative": false
+}
